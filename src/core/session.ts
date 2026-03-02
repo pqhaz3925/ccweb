@@ -60,6 +60,8 @@ export class Session {
     this.startWatchdog();
 
     const envVars: Record<string, string | undefined> = { ...process.env, ...opts?.env };
+    // Unset CLAUDECODE to allow SDK to spawn a subprocess when running inside a Claude Code session
+    delete envVars['CLAUDECODE'];
 
     try {
       const q = sdkQuery({
@@ -71,7 +73,6 @@ export class Session {
           allowDangerouslySkipPermissions: true,
           includePartialMessages: true,
           resume: opts?.resume ?? this.sdkSessionId ?? undefined,
-          systemPrompt: { type: 'preset', preset: 'claude_code' },
           settingSources: ['user', 'project', 'local'],
           env: envVars,
         },
@@ -113,12 +114,12 @@ export class Session {
   private processMessage(message: SDKMessage) {
     switch (message.type) {
       case 'assistant': {
+        // Full assistant message — text was already streamed via stream_event deltas.
+        // Only extract metadata (session_id, usage, tool_use blocks).
         const msg = message as SDKAssistantMessage;
         this.sdkSessionId = msg.session_id;
         for (const block of msg.message.content) {
-          if (block.type === 'text') {
-            this.emitChunk('text', block.text);
-          } else if (block.type === 'tool_use') {
+          if (block.type === 'tool_use') {
             this.emitChunk('tool_use', JSON.stringify({ tool: block.name, input: block.input }));
           }
         }
@@ -128,6 +129,7 @@ export class Session {
         break;
       }
       case 'stream_event': {
+        // Real-time incremental deltas — this is what drives the streaming UI
         const partial = message as SDKPartialAssistantMessage;
         const evt = partial.event;
         if ('delta' in evt && evt.delta && 'text' in evt.delta) {
@@ -140,9 +142,7 @@ export class Session {
         this.sdkSessionId = result.session_id;
         this.costUsd = result.total_cost_usd;
         this.tokensUsed = (result.usage.input_tokens ?? 0) + (result.usage.output_tokens ?? 0);
-        if (result.subtype === 'success') {
-          this.emitChunk('result', result.result);
-        } else {
+        if (result.subtype !== 'success') {
           this.emitChunk('error', `Session ended: ${result.subtype}`);
         }
         this.emitter.emit('ended', this.getInfo(), result.subtype);
