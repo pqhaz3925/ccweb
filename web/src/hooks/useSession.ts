@@ -8,6 +8,7 @@ type ServerMessage = {
   reason?: string;
   version?: string;
   project?: any;
+  messages?: Array<{ type: string; content: string; timestamp: string }>;
 };
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected';
@@ -112,6 +113,37 @@ export function useSession() {
               setIsRunning(msg.session.status === 'running');
             }
             break;
+
+          case 'history': {
+            // Restore messages from server (on reconnect/reload)
+            if (msg.messages && msg.messages.length > 0) {
+              const restored: ChatMessage[] = [];
+              for (const m of msg.messages) {
+                if (STREAMABLE_TYPES.has(m.type)) {
+                  const last = restored[restored.length - 1];
+                  if (last && last.type === 'assistant') {
+                    last.content += m.content;
+                  } else {
+                    restored.push({
+                      id: ++msgIdCounter,
+                      type: 'assistant',
+                      content: m.content,
+                      timestamp: Date.parse(m.timestamp) || Date.now(),
+                    });
+                  }
+                } else {
+                  restored.push({
+                    id: ++msgIdCounter,
+                    type: m.type as ChatMessage['type'],
+                    content: m.content,
+                    timestamp: Date.parse(m.timestamp) || Date.now(),
+                  });
+                }
+              }
+              setMessages(restored);
+            }
+            break;
+          }
 
           case 'connected':
             break;

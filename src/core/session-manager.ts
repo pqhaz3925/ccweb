@@ -3,6 +3,8 @@ import { TypedEmitter } from '../shared/events.js';
 import type { SessionInfo, CCWebConfig } from '../shared/types.js';
 import { getDb } from './db.js';
 
+const DEAD_STATES = new Set(['dead', 'error']);
+
 export class SessionManager {
   private currentSession: Session | null = null;
   private currentProjectPath: string;
@@ -22,19 +24,30 @@ export class SessionManager {
     }
   }
 
-  async sendPrompt(prompt: string): Promise<void> {
-    if (!this.currentSession || this.currentSession.getInfo().status !== 'running') {
-      this.currentSession = new Session(this.currentProjectPath, {
-        timeoutMs: this.config.timeoutMs,
-        watchdogIntervalMs: this.config.watchdogIntervalMs,
-      });
+  private createSession(): Session {
+    const session = new Session(this.currentProjectPath, {
+      timeoutMs: this.config.timeoutMs,
+      watchdogIntervalMs: this.config.watchdogIntervalMs,
+    });
 
-      // Forward events
-      this.currentSession.emitter.on('chunk', (chunk) => this.emitter.emit('chunk', chunk));
-      this.currentSession.emitter.on('started', (info) => this.emitter.emit('started', info));
-      this.currentSession.emitter.on('ended', (info, reason) => this.emitter.emit('ended', info, reason));
-      this.currentSession.emitter.on('error', (err) => this.emitter.emit('error', err));
-      this.currentSession.emitter.on('status_change', (info) => this.emitter.emit('status_change', info));
+    // Forward events
+    session.emitter.on('chunk', (chunk) => this.emitter.emit('chunk', chunk));
+    session.emitter.on('started', (info) => this.emitter.emit('started', info));
+    session.emitter.on('ended', (info, reason) => this.emitter.emit('ended', info, reason));
+    session.emitter.on('error', (err) => this.emitter.emit('error', err));
+    session.emitter.on('status_change', (info) => this.emitter.emit('status_change', info));
+
+    return session;
+  }
+
+  async sendPrompt(prompt: string): Promise<void> {
+    // Only create a new session if there's none, or current one is dead/errored
+    if (!this.currentSession || DEAD_STATES.has(this.currentSession.getInfo().status)) {
+      this.currentSession = this.createSession();
+    }
+
+    if (this.currentSession.getInfo().status === 'running') {
+      throw new Error('Session already running. Interrupt first.');
     }
 
     const resume = this.currentSession.getInfo().sdkSessionId ?? undefined;
@@ -53,16 +66,7 @@ export class SessionManager {
       const oldSdkSessionId = this.currentSession.getInfo().sdkSessionId;
       await this.interrupt();
 
-      this.currentSession = new Session(this.currentProjectPath, {
-        timeoutMs: this.config.timeoutMs,
-        watchdogIntervalMs: this.config.watchdogIntervalMs,
-      });
-
-      this.currentSession.emitter.on('chunk', (chunk) => this.emitter.emit('chunk', chunk));
-      this.currentSession.emitter.on('started', (info) => this.emitter.emit('started', info));
-      this.currentSession.emitter.on('ended', (info, reason) => this.emitter.emit('ended', info, reason));
-      this.currentSession.emitter.on('error', (err) => this.emitter.emit('error', err));
-      this.currentSession.emitter.on('status_change', (info) => this.emitter.emit('status_change', info));
+      this.currentSession = this.createSession();
 
       if (oldSdkSessionId) {
         await this.currentSession.sendPrompt('Continue from where we left off.', {
@@ -85,12 +89,26 @@ export class SessionManager {
     };
   }
 
+  /** Get messages for the current session from SQLite */
+  getMessages(limit = 200): Array<{ type: string; content: string; timestamp: string }> {
+    if (!this.currentSession) return [];
+    const db = getDb();
+    const rows = db.prepare(
+      `SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY rowid ASC LIMIT ?`
+    ).all(this.currentSession.getInfo().id, limit) as any[];
+    return rows.map((r: any) => ({
+      type: r.role,
+      content: r.content,
+      timestamp: r.timestamp,
+    }));
+  }
+
   getHistory(limit = 20): SessionInfo[] {
     const db = getDb();
     const rows = db.prepare(
       `SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?`
     ).all(limit) as any[];
-    return rows.map((r) => ({
+    return rows.map((r: any) => ({
       id: r.id,
       projectId: r.project_path,
       status: r.status,

@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch ./src/index.ts",
     "dev:web": "cd web && vite",
     "build": "tsc --noEmit && cd web && vite build",
     "start": "node dist/index.js"
@@ -21,8 +21,10 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.13.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "ws": "^8.19.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

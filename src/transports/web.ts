@@ -29,6 +29,9 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
   // History endpoint
   fastify.get('/api/history', async () => sessionManager.getHistory());
 
+  // Messages for current session (for reconnect/reload)
+  fastify.get('/api/messages', async () => sessionManager.getMessages());
+
   // WebSocket for real-time streaming
   fastify.get('/ws', { websocket: true }, (socket) => {
     console.log('[web] Client connected');
@@ -43,6 +46,12 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
     send({ type: 'connected', version: '0.1.0' });
     const status = sessionManager.getStatus();
     send({ type: 'status', session: status.session, project: null });
+
+    // Send existing messages so client can restore history on reconnect
+    const existingMessages = sessionManager.getMessages();
+    if (existingMessages.length > 0) {
+      send({ type: 'history', messages: existingMessages } as any);
+    }
 
     // Subscribe to session events
     const onChunk = (chunk: StreamChunk) => send({ type: 'chunk', chunk });
