@@ -12,8 +12,20 @@ type ServerMessage = {
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
+export type ChatMessage = {
+  id: number;
+  type: 'user' | 'assistant' | 'tool_use' | 'system' | 'status' | 'error' | 'result';
+  content: string;
+  timestamp: number;
+};
+
+let msgIdCounter = 0;
+
+// Chunk types that should be appended to the current assistant bubble
+const STREAMABLE_TYPES = new Set(['text']);
+
 export function useSession() {
-  const [messages, setMessages] = useState<Array<{ type: string; content: string; timestamp: number }>>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [isRunning, setIsRunning] = useState(false);
   const [sessionInfo, setSessionInfo] = useState<any>(null);
@@ -38,35 +50,69 @@ export function useSession() {
         switch (msg.type) {
           case 'chunk':
             if (msg.chunk) {
-              setMessages((prev) => [...prev, {
-                type: msg.chunk!.type,
-                content: msg.chunk!.content,
-                timestamp: msg.chunk!.timestamp,
-              }]);
+              const chunk = msg.chunk;
+
+              if (STREAMABLE_TYPES.has(chunk.type)) {
+                // Append to existing assistant message or create new one
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.type === 'assistant') {
+                    // Append to existing assistant bubble
+                    const updated = [...prev];
+                    updated[updated.length - 1] = {
+                      ...last,
+                      content: last.content + chunk.content,
+                      timestamp: chunk.timestamp,
+                    };
+                    return updated;
+                  }
+                  // New assistant bubble
+                  return [...prev, {
+                    id: ++msgIdCounter,
+                    type: 'assistant',
+                    content: chunk.content,
+                    timestamp: chunk.timestamp,
+                  }];
+                });
+              } else {
+                // Non-text chunks (tool_use, system, status, error, result) get their own entry
+                setMessages((prev) => [...prev, {
+                  id: ++msgIdCounter,
+                  type: chunk.type as ChatMessage['type'],
+                  content: chunk.content,
+                  timestamp: chunk.timestamp,
+                }]);
+              }
             }
             break;
+
           case 'session_started':
             setIsRunning(true);
             setSessionInfo(msg.session);
             break;
+
           case 'session_ended':
             setIsRunning(false);
             setSessionInfo(msg.session);
             break;
+
           case 'session_error':
             setMessages((prev) => [...prev, {
+              id: ++msgIdCounter,
               type: 'error',
               content: msg.error || 'Unknown error',
               timestamp: Date.now(),
             }]);
             setIsRunning(false);
             break;
+
           case 'status':
             setSessionInfo(msg.session);
             if (msg.session) {
               setIsRunning(msg.session.status === 'running');
             }
             break;
+
           case 'connected':
             break;
         }
@@ -84,7 +130,12 @@ export function useSession() {
   }, []);
 
   const sendPrompt = useCallback((prompt: string) => {
-    setMessages((prev) => [...prev, { type: 'user', content: prompt, timestamp: Date.now() }]);
+    setMessages((prev) => [...prev, {
+      id: ++msgIdCounter,
+      type: 'user',
+      content: prompt,
+      timestamp: Date.now(),
+    }]);
     send({ type: 'send_prompt', prompt });
   }, [send]);
 

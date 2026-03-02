@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useSession } from './hooks/useSession';
+import type { ChatMessage } from './hooks/useSession';
 
 const styles = {
   app: {
@@ -38,27 +39,53 @@ const styles = {
     padding: '12px 16px',
     display: 'flex',
     flexDirection: 'column' as const,
-    gap: '4px',
+    gap: '8px',
     WebkitOverflowScrolling: 'touch' as const,
   },
-  message: (type: string) => ({
-    padding: type === 'user' ? '10px 14px' : '2px 0',
-    borderRadius: type === 'user' ? '16px' : '0',
-    backgroundColor: type === 'user' ? '#1c3a5e' : 'transparent',
-    alignSelf: type === 'user' ? 'flex-end' as const : 'flex-start' as const,
-    maxWidth: type === 'user' ? '85%' : '100%',
+  userMsg: {
+    padding: '10px 14px',
+    borderRadius: '16px',
+    backgroundColor: '#1c3a5e',
+    alignSelf: 'flex-end' as const,
+    maxWidth: '85%',
     fontSize: '15px',
     lineHeight: '1.4',
     whiteSpace: 'pre-wrap' as const,
     wordBreak: 'break-word' as const,
-    color: type === 'error' ? '#ff6b6b' :
-           type === 'tool_use' ? '#a78bfa' :
-           type === 'status' ? '#64748b' :
-           type === 'system' ? '#64748b' :
-           type === 'result' ? '#34c759' :
-           '#e0e0e0',
-    fontFamily: type === 'user' ? 'inherit' : "'SF Mono', 'Fira Code', monospace",
-  }),
+    color: '#e0e0e0',
+  },
+  assistantMsg: {
+    padding: '4px 0',
+    fontSize: '15px',
+    lineHeight: '1.5',
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+    color: '#e0e0e0',
+    fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+  },
+  toolMsg: {
+    padding: '6px 10px',
+    borderRadius: '8px',
+    backgroundColor: '#1a1a2e',
+    borderLeft: '3px solid #a78bfa',
+    fontSize: '13px',
+    color: '#a78bfa',
+    fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+  },
+  systemMsg: {
+    padding: '2px 0',
+    fontSize: '13px',
+    color: '#64748b',
+    fontStyle: 'italic' as const,
+  },
+  errorMsg: {
+    padding: '6px 10px',
+    borderRadius: '8px',
+    backgroundColor: '#2d1515',
+    borderLeft: '3px solid #ff6b6b',
+    fontSize: '14px',
+    color: '#ff6b6b',
+  },
   inputArea: {
     display: 'flex',
     gap: '8px',
@@ -107,7 +134,6 @@ const styles = {
   },
 };
 
-// Global CSS reset
 const globalStyles = `
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { overflow: hidden; }
@@ -115,6 +141,41 @@ const globalStyles = `
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 `;
+
+function formatToolUse(content: string): string {
+  try {
+    const parsed = JSON.parse(content);
+    return `${parsed.tool}`;
+  } catch {
+    return 'Tool call';
+  }
+}
+
+function MessageBubble({ msg }: { msg: ChatMessage }) {
+  switch (msg.type) {
+    case 'user':
+      return <div style={styles.userMsg}>{msg.content}</div>;
+
+    case 'assistant':
+      return <div style={styles.assistantMsg}>{msg.content}</div>;
+
+    case 'tool_use':
+      return <div style={styles.toolMsg}>{formatToolUse(msg.content)}</div>;
+
+    case 'system':
+    case 'status':
+      return <div style={styles.systemMsg}>{msg.content}</div>;
+
+    case 'error':
+      return <div style={styles.errorMsg}>{msg.content}</div>;
+
+    case 'result':
+      return <div style={{ ...styles.systemMsg, color: '#34c759' }}>{msg.content}</div>;
+
+    default:
+      return <div style={styles.assistantMsg}>{msg.content}</div>;
+  }
+}
 
 export function App() {
   const { messages, connectionState, isRunning, sessionInfo, sendPrompt, interrupt, restart, clearMessages } = useSession();
@@ -172,10 +233,8 @@ export function App() {
               Send a message to start
             </div>
           )}
-          {messages.map((msg, i) => (
-            <div key={i} style={styles.message(msg.type)}>
-              {msg.content}
-            </div>
+          {messages.map((msg) => (
+            <MessageBubble key={msg.id} msg={msg} />
           ))}
           <div ref={messagesEndRef} />
         </div>
