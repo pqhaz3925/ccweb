@@ -288,7 +288,13 @@ export class Session {
         this.costUsd = result.total_cost_usd;
         this.tokensUsed = (result.usage.input_tokens ?? 0) + (result.usage.output_tokens ?? 0);
         if (result.subtype !== 'success') {
-          this.emitChunk('error', `Session ended: ${result.subtype}`);
+          const sub = result.subtype as string;
+          const reason = sub === 'error_during_execution'
+            ? 'Claude crashed. Send a new message to continue.'
+            : sub === 'interrupted'
+            ? 'Stopped.'
+            : `Session ended: ${sub}`;
+          this.emitChunk('error', reason);
         }
         this.emitter.emit('ended', this.getInfo(), result.subtype);
         break;
