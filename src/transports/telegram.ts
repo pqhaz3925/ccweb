@@ -169,6 +169,36 @@ export async function startTelegramBot(
     }
   }
 
+  async function sendLongMessage(chatId: number, text: string, html?: string) {
+    const TG_LIMIT = 4096;
+
+    // Try HTML first, fall back to plain text
+    const content = html || text;
+    const fallback = html ? text : null;
+
+    if (content.length <= TG_LIMIT) {
+      try {
+        await bot.api.sendMessage(chatId, content, html ? { parse_mode: 'HTML' } : {});
+        return;
+      } catch {
+        if (fallback && fallback.length <= TG_LIMIT) {
+          try { await bot.api.sendMessage(chatId, fallback); return; } catch {}
+        }
+      }
+    }
+
+    // Split long text into chunks (use plain text for reliable splitting)
+    const source = text;
+    for (let i = 0; i < source.length; i += TG_LIMIT) {
+      const chunk = source.slice(i, i + TG_LIMIT);
+      try {
+        await bot.api.sendMessage(chatId, chunk);
+      } catch (e: unknown) {
+        console.error('[telegram] Chunk send error:', e instanceof Error ? e.message : '');
+      }
+    }
+  }
+
   async function finalizeDraft(chatId: number) {
     const state = getChatState(chatId);
     const text = state.fullText + state.buffer;
@@ -177,21 +207,8 @@ export async function startTelegramBot(
 
     if (!text.trim()) return;
 
-    // Send final message with HTML formatting
     const html = markdownToTelegramHtml(text);
-    try {
-      await bot.api.sendMessage(chatId, html, { parse_mode: 'HTML' });
-    } catch {
-      // Fallback: send as plain text if HTML parsing fails
-      try {
-        await bot.api.sendMessage(chatId, text);
-      } catch (e2: unknown) {
-        console.error(
-          '[telegram] Send error:',
-          e2 instanceof Error ? e2.message : ''
-        );
-      }
-    }
+    await sendLongMessage(chatId, text, html);
   }
 
   function startStreaming(chatId: number) {

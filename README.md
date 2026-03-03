@@ -7,6 +7,8 @@ Access your Claude Code sessions from phone, tablet, or any browser. Send prompt
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Node](https://img.shields.io/badge/node-22%2B-green)
 
+[Русская версия](README.ru.md)
+
 ## Features
 
 - **Web UI** — mobile-first React PWA with real-time streaming via WebSocket
@@ -89,6 +91,7 @@ Send any text message to prompt Claude Code. Send photos or files for analysis.
 # On server (Ubuntu/Debian)
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
+npm install -g @anthropic-ai/claude-code@latest
 
 # Copy project
 rsync -avz --exclude='node_modules' --exclude='.git' . root@your-server:/opt/ccweb/
@@ -166,81 +169,5 @@ systemctl start ccweb
 - **AI**: `@anthropic-ai/claude-agent-sdk`
 
 ## License
-
-MIT
-
----
-
-# CCWeb (RU)
-
-Панель удалённого управления [Claude Code](https://code.claude.com) через веб и Telegram.
-
-Доступ к Claude Code с телефона, планшета или браузера. Отправка промптов, управление плагинами, редактирование памяти, переключение проектов — всё удалённо.
-
-## Возможности
-
-- **Веб-интерфейс** — мобильный React PWA с real-time стримингом через WebSocket
-- **Telegram-бот** — полный доступ к Claude Code из Telegram: стриминг через drafts, индикатор набора, отправка фото/файлов
-- **Мультисессии** — создание, переключение и управление несколькими чатами
-- **Маркетплейс плагинов** — просмотр, установка, включение/выключение плагинов
-- **MCP-серверы** — управление глобальными и проектными MCP-серверами
-- **Навыки (Skills)** — просмотр проектных и глобальных навыков Claude Code
-- **Редактор памяти** — просмотр и редактирование всех CLAUDE.md файлов
-- **Разрешения** — переключение между режимами Default / Accept Edits / YOLO
-- **Персистентность** — SQLite-история переживает перезапуски
-
-## Быстрый старт
-
-```bash
-git clone https://github.com/pqhaz3925/ccweb.git
-cd ccweb
-npm install && cd web && npm install && cd ..
-
-cp ccweb.config.example.json ccweb.config.json
-# Отредактируй ccweb.config.json — вставь токен бота
-
-npm run build && npx tsc
-
-export ANTHROPIC_API_KEY="sk-ant-..."
-npm start
-```
-
-Открой `http://localhost:3001` в браузере.
-
-## Деплой на VPS
-
-```bash
-# На сервере
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install -y nodejs
-
-rsync -avz --exclude='node_modules' --exclude='.git' . root@сервер:/opt/ccweb/
-
-# На сервере
-cd /opt/ccweb && npm install --production
-cp ccweb.config.example.json ccweb.config.json
-# Настрой конфиг
-
-# systemd сервис
-cat > /etc/systemd/system/ccweb.service << 'EOF'
-[Unit]
-Description=CCWeb
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/ccweb
-ExecStart=/usr/bin/node dist/index.js
-Environment=ANTHROPIC_API_KEY=sk-ant-...
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable ccweb && systemctl start ccweb
-```
-
-## Лицензия
 
 MIT
