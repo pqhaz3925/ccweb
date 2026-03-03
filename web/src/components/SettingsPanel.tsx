@@ -151,14 +151,16 @@ function pluginId(name: string, marketplace: string) {
 
 // ─── Plugin Card ─────────────────────────────────────────────
 
-function PluginCard({ plugin, installed, enabled, onToggle }: {
+function PluginCard({ plugin, installed, enabled, onToggle, onInstall }: {
   plugin: CatalogPlugin;
   installed: boolean;
   enabled: boolean;
   onToggle: (id: string, enabled: boolean) => void;
+  onInstall: (name: string) => Promise<void>;
 }) {
   const id = pluginId(plugin.name, plugin.marketplace);
   const catColor = CATEGORY_COLORS[plugin.category ?? ''] ?? '#555';
+  const [installing, setInstalling] = useState(false);
   return (
     <div style={S.card}>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -180,12 +182,18 @@ function PluginCard({ plugin, installed, enabled, onToggle }: {
           !installed ? true : enabled,
           !installed ? colors.accent : colors.green,
         )}
-        onClick={() => {
-          if (!installed) onToggle(id, true);
-          else onToggle(id, !enabled);
+        disabled={installing}
+        onClick={async () => {
+          if (!installed) {
+            setInstalling(true);
+            await onInstall(plugin.name);
+            setInstalling(false);
+          } else {
+            onToggle(id, !enabled);
+          }
         }}
       >
-        {!installed ? 'Install' : enabled ? 'ON' : 'OFF'}
+        {installing ? '...' : !installed ? 'Install' : enabled ? 'ON' : 'OFF'}
       </button>
     </div>
   );
@@ -582,6 +590,20 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     setMcp((prev) => prev ? { ...prev, enabledPlugins: { ...prev.enabledPlugins, [id]: enabled } } : prev);
   };
 
+  const handleInstallPlugin = async (name: string) => {
+    const res = await fetch('/api/mcp/install-plugin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      // Refresh MCP data
+      const fresh = await fetch('/api/mcp').then(r => r.json());
+      setMcp(fresh);
+    }
+  };
+
   const addMcpServer = async (name: string, config: McpServerConfig) => {
     await fetch('/api/mcp/server', {
       method: 'POST',
@@ -682,7 +704,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               {installedCatalog.map((p) => {
                 const id = pluginId(p.name, p.marketplace);
                 return (
-                  <PluginCard key={id} plugin={p} installed enabled={mcp.enabledPlugins[id] === true} onToggle={togglePlugin} />
+                  <PluginCard key={id} plugin={p} installed enabled={mcp.enabledPlugins[id] === true} onToggle={togglePlugin} onInstall={handleInstallPlugin} />
                 );
               })}
               {Object.keys(mcp.installedPlugins)
@@ -718,7 +740,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               {allCatalog.map((p) => {
                 const id = pluginId(p.name, p.marketplace);
                 return (
-                  <PluginCard key={id} plugin={p} installed={installedIds.has(id)} enabled={mcp.enabledPlugins[id] === true} onToggle={togglePlugin} />
+                  <PluginCard key={id} plugin={p} installed={installedIds.has(id)} enabled={mcp.enabledPlugins[id] === true} onToggle={togglePlugin} onInstall={handleInstallPlugin} />
                 );
               })}
               {allCatalog.length === 0 && <div style={S.empty}>No plugins match "{search}"</div>}

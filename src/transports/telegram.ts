@@ -458,18 +458,25 @@ export async function startTelegramBot(
     }
   });
 
-  await bot.api.setMyCommands([
-    { command: 'stop', description: 'Stop current task' },
-    { command: 'new', description: 'New chat session' },
-    { command: 'chats', description: 'List chat sessions' },
-    { command: 'chat', description: 'Switch to chat by number' },
-    { command: 'status', description: 'Current status' },
-    { command: 'project', description: 'Switch project path' },
-    { command: 'history', description: 'Recent session history' },
-    { command: 'restart', description: 'Restart Claude session' },
-  ]);
-
   bot.start();
   console.log('[telegram] Bot started');
+
+  // Set commands after bot.start() so the bot is already polling
+  try {
+    await bot.api.setMyCommands([
+      { command: 'stop', description: 'Stop current task' },
+      { command: 'new', description: 'New chat session' },
+      { command: 'chats', description: 'List chat sessions' },
+      { command: 'chat', description: 'Switch to chat by number' },
+      { command: 'status', description: 'Current status' },
+      { command: 'project', description: 'Switch project path' },
+      { command: 'history', description: 'Recent session history' },
+      { command: 'restart', description: 'Restart Claude session' },
+    ]);
+    console.log('[telegram] Bot commands registered');
+  } catch (err) {
+    console.error('[telegram] Failed to set bot commands:', err instanceof Error ? err.message : err);
+  }
+
   return bot;
 }

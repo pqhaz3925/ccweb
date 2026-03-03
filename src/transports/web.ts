@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import type { SessionManager } from '../core/session-manager.js';
 import type { ClientMessage, ServerMessage, StreamChunk, SessionInfo, SessionSummaryWire } from '../shared/types.js';
 import {
-  getMcpStatus, togglePlugin, setGlobalMcpServer,
+  getMcpStatus, togglePlugin, installPlugin, uninstallPlugin, setGlobalMcpServer,
   getSkills, getMemory, saveMemoryFile,
   getPermissionMode, setPermissionMode,
   type PermissionMode,
@@ -60,6 +60,21 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
     const { pluginId, enabled } = req.body as { pluginId: string; enabled: boolean };
     togglePlugin(pluginId, enabled);
     return { ok: true };
+  });
+
+  fastify.post('/api/mcp/install-plugin', async (req) => {
+    const { name, marketplace } = req.body as { name: string; marketplace?: string };
+    const result = installPlugin(name, marketplace);
+    if (!result.success) return { ok: false, error: result.error };
+    // Auto-enable after install
+    if (result.pluginId) togglePlugin(result.pluginId, true);
+    return { ok: true, pluginId: result.pluginId };
+  });
+
+  fastify.post('/api/mcp/uninstall-plugin', async (req) => {
+    const { pluginId } = req.body as { pluginId: string };
+    const result = uninstallPlugin(pluginId);
+    return { ok: result.success, error: result.error };
   });
 
   fastify.post('/api/mcp/server', async (req) => {

@@ -1,14 +1,14 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, cpSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
+import { execSync } from 'node:child_process';
 
 const CLAUDE_DIR = join(homedir(), '.claude');
 const SETTINGS_FILE = join(CLAUDE_DIR, 'settings.json');
 const PLUGINS_DIR = join(CLAUDE_DIR, 'plugins');
 const MARKETPLACES_DIR = join(PLUGINS_DIR, 'marketplaces');
 const INSTALLED_PLUGINS_FILE = join(PLUGINS_DIR, 'installed_plugins.json');
-// KNOWN_MARKETPLACES_FILE could be used for adding new marketplace sources
-// const KNOWN_MARKETPLACES_FILE = join(PLUGINS_DIR, 'known_marketplaces.json');
+const CACHE_DIR = join(PLUGINS_DIR, 'cache');
 
 export interface McpServerConfig {
   command: string;
@@ -165,6 +165,135 @@ export function setProjectMcpServer(projectPath: string, name: string, config: M
     mcp.mcpServers[name] = config;
   }
   saveProjectMcp(projectPath, mcp);
+}
+
+// ─── Plugin Installation ─────────────────────────────────────
+
+function saveInstalledPlugins(data: { version: number; plugins: Record<string, InstalledPluginInfo[]> }): void {
+  mkdirSync(PLUGINS_DIR, { recursive: true });
+  writeFileSync(INSTALLED_PLUGINS_FILE, JSON.stringify(data, null, 2) + '\n');
+}
+
+function getInstalledPluginsRaw(): { version: number; plugins: Record<string, InstalledPluginInfo[]> } {
+  if (!existsSync(INSTALLED_PLUGINS_FILE)) return { version: 2, plugins: {} };
+  try {
+    return JSON.parse(readFileSync(INSTALLED_PLUGINS_FILE, 'utf-8'));
+  } catch {
+    return { version: 2, plugins: {} };
+  }
+}
+
+/** Find a plugin in any marketplace by name */
+function findPluginInMarketplace(pluginName: string): { plugin: MarketplacePlugin; marketplaceDir: string } | null {
+  if (!existsSync(MARKETPLACES_DIR)) return null;
+  const marketplaces = readdirSync(MARKETPLACES_DIR, { withFileTypes: true }).filter(d => d.isDirectory());
+  for (const mkt of marketplaces) {
+    const manifestPath = join(MARKETPLACES_DIR, mkt.name, '.claude-plugin', 'marketplace.json');
+    if (!existsSync(manifestPath)) continue;
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+      if (Array.isArray(manifest.plugins)) {
+        const found = manifest.plugins.find((p: MarketplacePlugin) => p.name === pluginName);
+        if (found) return { plugin: { ...found, marketplace: mkt.name }, marketplaceDir: join(MARKETPLACES_DIR, mkt.name) };
+      }
+    } catch { /* skip */ }
+  }
+  return null;
+}
+
+/** Install a plugin from marketplace */
+export function installPlugin(pluginName: string, _marketplace?: string): { success: boolean; error?: string; pluginId?: string } {
+  const found = findPluginInMarketplace(pluginName);
+  if (!found) return { success: false, error: `Plugin "${pluginName}" not found in any marketplace` };
+
+  const { plugin, marketplaceDir } = found;
+  const mktName = plugin.marketplace;
+  const pluginId = `${pluginName}@${mktName}`;
+  const version = plugin.version ?? 'latest';
+  const installPath = join(CACHE_DIR, mktName, pluginName, version);
+
+  // Already installed?
+  const data = getInstalledPluginsRaw();
+  if (data.plugins[pluginId]?.length) {
+    return { success: true, pluginId }; // already installed
+  }
+
+  mkdirSync(installPath, { recursive: true });
+
+  try {
+    const source = plugin.source;
+
+    if (typeof source === 'string' && source.startsWith('./')) {
+      // Local marketplace plugin — copy from marketplace dir
+      const srcDir = resolve(marketplaceDir, source);
+      if (!existsSync(srcDir)) return { success: false, error: `Source dir not found: ${srcDir}` };
+      cpSync(srcDir, installPath, { recursive: true });
+    } else if (typeof source === 'object' && source.source === 'url' && source.url) {
+      // Git clone
+      const url = source.url;
+      execSync(`git clone --depth 1 "${url}" "${installPath}"`, { timeout: 60000, stdio: 'pipe' });
+    } else if (typeof source === 'object' && source.source === 'github' && source.repo) {
+      // GitHub repo
+      const url = `https://github.com/${source.repo}.git`;
+      execSync(`git clone --depth 1 "${url}" "${installPath}"`, { timeout: 60000, stdio: 'pipe' });
+    } else {
+      return { success: false, error: `Unknown source type for plugin "${pluginName}"` };
+    }
+
+    // Write plugin.json if missing
+    const pluginJsonDir = join(installPath, '.claude-plugin');
+    const pluginJsonPath = join(pluginJsonDir, 'plugin.json');
+    if (!existsSync(pluginJsonPath)) {
+      mkdirSync(pluginJsonDir, { recursive: true });
+      writeFileSync(pluginJsonPath, JSON.stringify({
+        name: plugin.name,
+        description: plugin.description,
+        version,
+        author: plugin.author,
+      }, null, 2) + '\n');
+    }
+
+    // Update installed_plugins.json
+    data.plugins[pluginId] = [{
+      scope: 'user',
+      installPath,
+      version,
+      installedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    }];
+    saveInstalledPlugins(data);
+
+    return { success: true, pluginId };
+  } catch (err) {
+    // Cleanup on failure
+    try { rmSync(installPath, { recursive: true, force: true }); } catch {}
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Uninstall a plugin */
+export function uninstallPlugin(pluginId: string): { success: boolean; error?: string } {
+  const data = getInstalledPluginsRaw();
+  const entries = data.plugins[pluginId];
+  if (!entries?.length) return { success: false, error: `Plugin "${pluginId}" not installed` };
+
+  // Remove from disk
+  for (const entry of entries) {
+    try { rmSync(entry.installPath, { recursive: true, force: true }); } catch {}
+  }
+
+  // Remove from installed_plugins.json
+  delete data.plugins[pluginId];
+  saveInstalledPlugins(data);
+
+  // Remove from enabled plugins in settings
+  const settings = getClaudeSettings();
+  if (settings.enabledPlugins?.[pluginId] !== undefined) {
+    delete settings.enabledPlugins[pluginId];
+    saveClaudeSettings(settings);
+  }
+
+  return { success: true };
 }
 
 // ─── Skills ───────────────────────────────────────────────────
