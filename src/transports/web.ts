@@ -4,7 +4,22 @@ import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { SessionManager } from '../core/session-manager.js';
-import type { ClientMessage, ServerMessage, StreamChunk, SessionInfo } from '../shared/types.js';
+import type { ClientMessage, ServerMessage, StreamChunk, SessionInfo, SessionSummaryWire } from '../shared/types.js';
+import {
+  getMcpStatus, togglePlugin, setGlobalMcpServer,
+  getSkills, getMemory, saveMemoryFile,
+  getPermissionMode, setPermissionMode,
+  type PermissionMode,
+} from '../core/mcp-manager.js';
+
+function buildSessionsList(sm: SessionManager): { sessions: SessionSummaryWire[]; activeId: string | null } {
+  const activeId = sm.getActiveSessionId();
+  const sessions = sm.listSessions().map((s) => ({
+    ...s,
+    active: s.id === activeId,
+  }));
+  return { sessions, activeId };
+}
 
 export async function startWebServer(sessionManager: SessionManager, port: number, host: string) {
   const fastify = Fastify({ logger: false });
@@ -32,6 +47,57 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
   // Messages for current session (for reconnect/reload)
   fastify.get('/api/messages', async () => sessionManager.getMessages());
 
+  // Sessions list
+  fastify.get('/api/sessions', async () => buildSessionsList(sessionManager));
+
+  // MCP / Plugins
+  fastify.get('/api/mcp', async () => {
+    const projectPath = sessionManager.getStatus().projectPath;
+    return getMcpStatus(projectPath);
+  });
+
+  fastify.post('/api/mcp/toggle-plugin', async (req) => {
+    const { pluginId, enabled } = req.body as { pluginId: string; enabled: boolean };
+    togglePlugin(pluginId, enabled);
+    return { ok: true };
+  });
+
+  fastify.post('/api/mcp/server', async (req) => {
+    const { name, config } = req.body as { name: string; config: any };
+    setGlobalMcpServer(name, config ?? null);
+    return { ok: true };
+  });
+
+  // Skills
+  fastify.get('/api/skills', async () => {
+    const projectPath = sessionManager.getStatus().projectPath;
+    return getSkills(projectPath);
+  });
+
+  // Memory / CLAUDE.md
+  fastify.get('/api/memory', async () => {
+    const projectPath = sessionManager.getStatus().projectPath;
+    return getMemory(projectPath);
+  });
+
+  fastify.post('/api/memory', async (req) => {
+    const { fileKey, content } = req.body as { fileKey: string; content: string };
+    const projectPath = sessionManager.getStatus().projectPath;
+    saveMemoryFile(projectPath, fileKey, content);
+    return { ok: true };
+  });
+
+  // Permissions
+  fastify.get('/api/permissions', async () => {
+    return { mode: getPermissionMode() };
+  });
+
+  fastify.post('/api/permissions', async (req) => {
+    const { mode } = req.body as { mode: PermissionMode };
+    setPermissionMode(mode);
+    return { ok: true };
+  });
+
   // WebSocket for real-time streaming
   fastify.get('/ws', { websocket: true }, (socket) => {
     console.log('[web] Client connected');
@@ -47,10 +113,14 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
     const status = sessionManager.getStatus();
     send({ type: 'status', session: status.session, project: null });
 
+    // Send sessions list
+    const sl = buildSessionsList(sessionManager);
+    send({ type: 'sessions_list', sessions: sl.sessions, activeId: sl.activeId });
+
     // Send existing messages so client can restore history on reconnect
     const existingMessages = sessionManager.getMessages();
     if (existingMessages.length > 0) {
-      send({ type: 'history', messages: existingMessages } as any);
+      send({ type: 'history', messages: existingMessages });
     }
 
     // Subscribe to session events
@@ -74,7 +144,7 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
         switch (msg.type) {
           case 'send_prompt':
             if (msg.projectPath) sessionManager.setProject(msg.projectPath);
-            sessionManager.sendPrompt(msg.prompt).catch((err) => {
+            sessionManager.sendPrompt(msg.prompt, 'web').catch((err) => {
               send({ type: 'session_error', error: err.message });
             });
             break;
@@ -83,6 +153,37 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
             break;
           case 'restart':
             await sessionManager.restart();
+            break;
+          case 'new_session': {
+            await sessionManager.newSession(msg.label);
+            const sl2 = buildSessionsList(sessionManager);
+            send({ type: 'sessions_list', sessions: sl2.sessions, activeId: sl2.activeId });
+            // Send empty history for the new session
+            send({ type: 'history', messages: [] });
+            break;
+          }
+          case 'switch_session': {
+            const ok = sessionManager.switchSession(msg.sessionId);
+            if (ok) {
+              const sl3 = buildSessionsList(sessionManager);
+              send({ type: 'sessions_list', sessions: sl3.sessions, activeId: sl3.activeId });
+              // Send messages for the switched-to session
+              const msgs = sessionManager.getMessages(msg.sessionId);
+              send({ type: 'history', messages: msgs });
+            } else {
+              send({ type: 'session_error', error: 'Session not found' });
+            }
+            break;
+          }
+          case 'list_sessions': {
+            const sl4 = buildSessionsList(sessionManager);
+            send({ type: 'sessions_list', sessions: sl4.sessions, activeId: sl4.activeId });
+            break;
+          }
+          case 'rewind':
+            sessionManager.rewind().catch((err) => {
+              send({ type: 'session_error', error: err.message });
+            });
             break;
           case 'status': {
             const s = sessionManager.getStatus();

@@ -39,7 +39,7 @@ export interface SessionInfo {
 }
 
 export interface StreamChunk {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'status' | 'error' | 'result' | 'system';
+  type: 'text' | 'user' | 'tool_use' | 'tool_result' | 'thinking' | 'status' | 'error' | 'result' | 'system';
   content: string;
   timestamp: number;
   metadata?: Record<string, unknown>;
@@ -50,8 +50,22 @@ export type ClientMessage =
   | { type: 'send_prompt'; prompt: string; projectPath?: string }
   | { type: 'interrupt' }
   | { type: 'restart' }
+  | { type: 'new_session'; label?: string }
+  | { type: 'switch_session'; sessionId: string }
+  | { type: 'list_sessions' }
+  | { type: 'rewind' }
   | { type: 'status' }
   | { type: 'set_project'; path: string };
+
+export interface SessionSummaryWire {
+  id: string;
+  label: string;
+  status: string;
+  startedAt: string;
+  tokensUsed: number;
+  lastMessage: string;
+  active: boolean;
+}
 
 // Messages from server -> client
 export type ServerMessage =
@@ -60,4 +74,6 @@ export type ServerMessage =
   | { type: 'session_ended'; session: SessionInfo; reason: string }
   | { type: 'session_error'; error: string }
   | { type: 'status'; session: SessionInfo | null; project: Project | null }
+  | { type: 'history'; messages: Array<{ type: string; content: string; timestamp: string }> }
+  | { type: 'sessions_list'; sessions: SessionSummaryWire[]; activeId: string | null }
   | { type: 'connected'; version: string };

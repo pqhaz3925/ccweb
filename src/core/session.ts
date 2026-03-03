@@ -21,6 +21,8 @@ export class Session {
   private lastEventTime = 0;
   private timeoutMs: number;
   private watchdogIntervalMs: number;
+  private hasInitialized = false;
+  private promptCount = 0;
 
   constructor(projectPath: string, opts: { timeoutMs: number; watchdogIntervalMs: number }) {
     this.id = randomUUID();
@@ -49,11 +51,20 @@ export class Session {
     };
   }
 
+  /** Save user prompt to DB so it shows up in history on reload */
+  saveUserPrompt(prompt: string, source?: string) {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO messages (session_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?)`
+    ).run(this.id, 'user', prompt, new Date().toISOString(), source ? JSON.stringify({ source }) : null);
+  }
+
   async sendPrompt(prompt: string, opts?: { resume?: string; env?: Record<string, string> }): Promise<void> {
     if (this.status === 'running') {
       throw new Error('Session already running. Interrupt first.');
     }
 
+    this.promptCount++;
     this.abortController = new AbortController();
     this.setStatus('running');
     this.lastEventTime = Date.now();
@@ -114,13 +125,21 @@ export class Session {
   private processMessage(message: SDKMessage) {
     switch (message.type) {
       case 'assistant': {
-        // Full assistant message — text was already streamed via stream_event deltas.
-        // Only extract metadata (session_id, usage, tool_use blocks).
         const msg = message as SDKAssistantMessage;
         this.sdkSessionId = msg.session_id;
         for (const block of msg.message.content) {
           if (block.type === 'tool_use') {
             this.emitChunk('tool_use', JSON.stringify({ tool: block.name, input: block.input }));
+          } else if (block.type === 'tool_result') {
+            const result = block as any;
+            const text = typeof result.content === 'string'
+              ? result.content
+              : Array.isArray(result.content)
+                ? result.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
+                : '';
+            if (text) {
+              this.emitChunk('tool_result', text.slice(0, 2000));
+            }
           }
         }
         if (msg.message.usage) {
@@ -129,7 +148,6 @@ export class Session {
         break;
       }
       case 'stream_event': {
-        // Real-time incremental deltas — this is what drives the streaming UI
         const partial = message as SDKPartialAssistantMessage;
         const evt = partial.event;
         if ('delta' in evt && evt.delta && 'text' in evt.delta) {
@@ -151,7 +169,11 @@ export class Session {
       case 'system': {
         if ('subtype' in message) {
           if (message.subtype === 'init') {
-            this.emitChunk('system', `Claude Code ${(message as any).claude_code_version} initialized`);
+            // Only show init on the very first prompt, suppress on resume
+            if (!this.hasInitialized) {
+              this.hasInitialized = true;
+              this.emitChunk('system', `Claude Code ${(message as any).claude_code_version}`);
+            }
           } else if (message.subtype === 'status') {
             const status = (message as any).status;
             if (status === 'compacting') {

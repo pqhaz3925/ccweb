@@ -1,0 +1,14 @@
+{
+  "web": {
+    "port": 3001,
+    "host": "0.0.0.0"
+  },
+  "telegram": {
+    "token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
+    "allowedUsers": []
+  },
+  "session": {
+    "timeoutMs": 1800000,
+    "defaultProject": "/path/to/your/project"
+  }
+}

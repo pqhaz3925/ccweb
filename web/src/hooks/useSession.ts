@@ -9,20 +9,32 @@ type ServerMessage = {
   version?: string;
   project?: any;
   messages?: Array<{ type: string; content: string; timestamp: string }>;
+  sessions?: SessionSummary[];
+  activeId?: string | null;
 };
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
 export type ChatMessage = {
   id: number;
-  type: 'user' | 'assistant' | 'tool_use' | 'system' | 'status' | 'error' | 'result';
+  type: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system' | 'status' | 'error' | 'result';
   content: string;
   timestamp: number;
+  source?: string;
+};
+
+export type SessionSummary = {
+  id: string;
+  label: string;
+  status: string;
+  startedAt: string;
+  tokensUsed: number;
+  lastMessage: string;
+  active: boolean;
 };
 
 let msgIdCounter = 0;
 
-// Chunk types that should be appended to the current assistant bubble
 const STREAMABLE_TYPES = new Set(['text']);
 
 export function useSession() {
@@ -30,6 +42,8 @@ export function useSession() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [isRunning, setIsRunning] = useState(false);
   const [sessionInfo, setSessionInfo] = useState<any>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -53,12 +67,27 @@ export function useSession() {
             if (msg.chunk) {
               const chunk = msg.chunk;
 
+              // User messages from server (from any transport)
+              if (chunk.type === 'user') {
+                // Only add if from another source (TG prompt showing in web)
+                // If from web, we already added it locally via sendPrompt
+                const source = chunk.metadata?.source;
+                if (source !== 'web') {
+                  setMessages((prev) => [...prev, {
+                    id: ++msgIdCounter,
+                    type: 'user',
+                    content: chunk.content,
+                    timestamp: chunk.timestamp,
+                    source: source as string,
+                  }]);
+                }
+                break;
+              }
+
               if (STREAMABLE_TYPES.has(chunk.type)) {
-                // Append to existing assistant message or create new one
                 setMessages((prev) => {
                   const last = prev[prev.length - 1];
                   if (last && last.type === 'assistant') {
-                    // Append to existing assistant bubble
                     const updated = [...prev];
                     updated[updated.length - 1] = {
                       ...last,
@@ -67,7 +96,6 @@ export function useSession() {
                     };
                     return updated;
                   }
-                  // New assistant bubble
                   return [...prev, {
                     id: ++msgIdCounter,
                     type: 'assistant',
@@ -76,7 +104,6 @@ export function useSession() {
                   }];
                 });
               } else {
-                // Non-text chunks (tool_use, system, status, error, result) get their own entry
                 setMessages((prev) => [...prev, {
                   id: ++msgIdCounter,
                   type: chunk.type as ChatMessage['type'],
@@ -114,9 +141,17 @@ export function useSession() {
             }
             break;
 
+          case 'sessions_list':
+            if (msg.sessions) setSessions(msg.sessions);
+            if (msg.activeId !== undefined) setActiveSessionId(msg.activeId);
+            break;
+
           case 'history': {
-            // Restore messages from server (on reconnect/reload)
-            if (msg.messages && msg.messages.length > 0) {
+            if (msg.messages) {
+              if (msg.messages.length === 0) {
+                setMessages([]);
+                break;
+              }
               const restored: ChatMessage[] = [];
               for (const m of msg.messages) {
                 if (STREAMABLE_TYPES.has(m.type)) {
@@ -131,6 +166,13 @@ export function useSession() {
                       timestamp: Date.parse(m.timestamp) || Date.now(),
                     });
                   }
+                } else if (m.type === 'user') {
+                  restored.push({
+                    id: ++msgIdCounter,
+                    type: 'user',
+                    content: m.content,
+                    timestamp: Date.parse(m.timestamp) || Date.now(),
+                  });
                 } else {
                   restored.push({
                     id: ++msgIdCounter,
@@ -162,6 +204,7 @@ export function useSession() {
   }, []);
 
   const sendPrompt = useCallback((prompt: string) => {
+    // Add user message locally for instant feedback
     setMessages((prev) => [...prev, {
       id: ++msgIdCounter,
       type: 'user',
@@ -176,7 +219,20 @@ export function useSession() {
     setMessages([]);
     send({ type: 'restart' });
   }, [send]);
+  const newSession = useCallback((label?: string) => {
+    send({ type: 'new_session', label });
+  }, [send]);
+  const switchSession = useCallback((sessionId: string) => {
+    send({ type: 'switch_session', sessionId });
+  }, [send]);
+  const rewind = useCallback(() => {
+    send({ type: 'rewind' });
+  }, [send]);
   const clearMessages = useCallback(() => setMessages([]), []);
 
-  return { messages, connectionState, isRunning, sessionInfo, sendPrompt, interrupt, restart, clearMessages };
+  return {
+    messages, connectionState, isRunning, sessionInfo,
+    sessions, activeSessionId,
+    sendPrompt, interrupt, restart, newSession, switchSession, rewind, clearMessages,
+  };
 }

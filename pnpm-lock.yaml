@@ -17,6 +17,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.0.1
         version: 11.2.0
+      '@grammyjs/stream':
+        specifier: ^1.0.0
+        version: 1.0.0(grammy@1.41.1)
       better-sqlite3:
         specifier: ^11.7.0
         version: 11.10.0
@@ -242,6 +245,12 @@ packages:
 
   '@fastify/websocket@11.2.0':
     resolution: {integrity: sha512-3HrDPbAG1CzUCqnslgJxppvzaAZffieOVbLp1DAy1huCSynUWPifSvfdEDUR8HlJLp3sp1A36uOM2tJogADS8w==}
+
+  '@grammyjs/stream@1.0.0':
+    resolution: {integrity: sha512-2VClaPdVhrl65vluYwhaKZitUac6Avfp6FUoFmaJVxxgTo8yDSYXncbbdISS9SRA3/edn2iI3Od+c/4gctQBRQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      grammy: ^1.39.0
 
   '@grammyjs/types@3.25.0':
     resolution: {integrity: sha512-iN9i5p+8ZOu9OMxWNcguojQfz4K/PDyMPOnL7PPCON+SoA/F8OKMH3uR7CVUkYfdNe0GCz8QOzAWrnqusQYFOg==}
@@ -977,6 +986,11 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+
+  '@grammyjs/stream@1.0.0(grammy@1.41.1)':
+    dependencies:
+      abort-controller: 3.0.0
+      grammy: 1.41.1
 
   '@grammyjs/types@3.25.0': {}
 
