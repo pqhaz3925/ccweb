@@ -34,18 +34,31 @@ export class Session {
   private promptCount = 0;
   private pendingQuestion: PendingQuestion | null = null;
 
-  constructor(projectPath: string, opts: { timeoutMs: number; watchdogIntervalMs: number }) {
-    this.id = randomUUID();
+  constructor(projectPath: string, opts: { timeoutMs: number; watchdogIntervalMs: number; restore?: { id: string; sdkSessionId: string | null; startedAt: string; tokensUsed: number; costUsd: number } }) {
     this.projectPath = projectPath;
-    this.startedAt = new Date().toISOString();
-    this.lastActivityAt = this.startedAt;
     this.timeoutMs = opts.timeoutMs;
     this.watchdogIntervalMs = opts.watchdogIntervalMs;
 
-    const db = getDb();
-    db.prepare(
-      `INSERT INTO sessions (id, project_path, status, started_at, last_activity_at) VALUES (?, ?, ?, ?, ?)`
-    ).run(this.id, projectPath, 'idle', this.startedAt, this.lastActivityAt);
+    if (opts.restore) {
+      // Restore from DB — don't insert a new row
+      this.id = opts.restore.id;
+      this.sdkSessionId = opts.restore.sdkSessionId;
+      this.startedAt = opts.restore.startedAt;
+      this.lastActivityAt = this.startedAt;
+      this.tokensUsed = opts.restore.tokensUsed;
+      this.costUsd = opts.restore.costUsd;
+      this.hasInitialized = true;
+    } else {
+      // Brand new session
+      this.id = randomUUID();
+      this.startedAt = new Date().toISOString();
+      this.lastActivityAt = this.startedAt;
+
+      const db = getDb();
+      db.prepare(
+        `INSERT INTO sessions (id, project_path, status, started_at, last_activity_at) VALUES (?, ?, ?, ?, ?)`
+      ).run(this.id, projectPath, 'idle', this.startedAt, this.lastActivityAt);
+    }
   }
 
   getInfo(): SessionInfo {
@@ -92,7 +105,7 @@ export class Session {
         options: {
           abortController: this.abortController,
           cwd: this.projectPath,
-          permissionMode: 'acceptEdits',
+          permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
           includePartialMessages: true,
           resume: opts?.resume ?? this.sdkSessionId ?? undefined,

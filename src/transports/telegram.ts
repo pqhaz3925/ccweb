@@ -234,6 +234,45 @@ export async function startTelegramBot(
     finalizeDraft(chatId);
   }
 
+  function formatToolUse(raw: string): string {
+    try {
+      const parsed = JSON.parse(raw);
+      const tool = parsed.tool ?? 'Tool';
+      const input = parsed.input;
+      if (!input) return `> ${tool}`;
+
+      switch (tool) {
+        case 'Bash': {
+          const cmd = input.command ?? '';
+          const short = cmd.length > 80 ? cmd.slice(0, 80) + '...' : cmd;
+          return `> $ ${short}`;
+        }
+        case 'Read':
+          return `> Read ${input.file_path ?? ''}`;
+        case 'Edit':
+          return `> Edit ${input.file_path ?? ''}`;
+        case 'Write':
+          return `> Write ${input.file_path ?? ''}`;
+        case 'Glob':
+          return `> Glob ${input.pattern ?? ''}`;
+        case 'Grep':
+          return `> Grep "${input.pattern ?? ''}"`;
+        case 'Task':
+          return `> Task: ${input.description ?? input.prompt?.slice(0, 60) ?? ''}`;
+        case 'TodoWrite':
+          return ''; // skip noise
+        case 'WebFetch':
+          return `> Fetch ${input.url ?? ''}`;
+        case 'WebSearch':
+          return `> Search "${input.query ?? ''}"`;
+        default:
+          return `> ${tool}`;
+      }
+    } catch {
+      return '> Tool call';
+    }
+  }
+
   function appendChunk(chatId: number, chunk: StreamChunk) {
     const state = getChatState(chatId);
     const stripped = stripAnsi(chunk.content);
@@ -242,22 +281,21 @@ export async function startTelegramBot(
       case 'text':
         state.buffer += stripped;
         break;
-      case 'tool_use':
-        try {
-          const parsed = JSON.parse(stripped);
-          state.buffer += `\n[${parsed.tool}]\n`;
-        } catch {
-          state.buffer += '\n[Tool call]\n';
-        }
+      case 'tool_use': {
+        const line = formatToolUse(stripped);
+        if (line) state.buffer += `\n${line}\n`;
         break;
+      }
       case 'tool_result':
-        if (stripped.length > 200) {
-          state.buffer += `${stripped.slice(0, 200)}...\n`;
-        } else if (stripped) {
+        // Only show short results or errors, skip verbose output
+        if (stripped.length > 0 && stripped.length <= 100) {
           state.buffer += `${stripped}\n`;
         }
         break;
       case 'error':
+        state.buffer += `\n${stripped}\n`;
+        break;
+      case 'question':
         state.buffer += `\n${stripped}\n`;
         break;
       case 'user':
