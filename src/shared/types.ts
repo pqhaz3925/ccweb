@@ -39,7 +39,7 @@ export interface SessionInfo {
 }
 
 export interface StreamChunk {
-  type: 'text' | 'user' | 'tool_use' | 'tool_result' | 'thinking' | 'status' | 'error' | 'result' | 'system';
+  type: 'text' | 'user' | 'tool_use' | 'tool_result' | 'thinking' | 'status' | 'error' | 'result' | 'system' | 'question';
   content: string;
   timestamp: number;
   metadata?: Record<string, unknown>;

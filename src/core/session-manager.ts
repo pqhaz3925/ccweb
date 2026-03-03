@@ -91,7 +91,36 @@ export class SessionManager {
     return session;
   }
 
+  /** Check if the active session has a pending question */
+  hasPendingQuestion(): boolean {
+    if (!this.activeSessionId) return false;
+    const entry = this.sessions.get(this.activeSessionId);
+    return entry?.session.hasPendingQuestion() ?? false;
+  }
+
+  /** Answer a pending question in the active session */
+  answerQuestion(answer: string): boolean {
+    if (!this.activeSessionId) return false;
+    const entry = this.sessions.get(this.activeSessionId);
+    if (!entry) return false;
+    return entry.session.answerQuestion(answer);
+  }
+
   async sendPrompt(prompt: string, source?: string): Promise<void> {
+    // If there's a pending question, route the answer instead of starting a new prompt
+    if (this.hasPendingQuestion()) {
+      // Emit the answer as a user chunk so it shows in chat
+      const userChunk: StreamChunk = {
+        type: 'user' as any,
+        content: prompt,
+        timestamp: Date.now(),
+        metadata: source ? { source } : undefined,
+      };
+      this.emitter.emit('chunk', userChunk);
+      this.answerQuestion(prompt);
+      return;
+    }
+
     const session = this.getOrCreateActive();
 
     if (session.getInfo().status === 'running') {

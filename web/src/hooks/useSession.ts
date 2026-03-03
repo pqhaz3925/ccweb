@@ -17,7 +17,7 @@ type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
 export type ChatMessage = {
   id: number;
-  type: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system' | 'status' | 'error' | 'result';
+  type: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system' | 'status' | 'error' | 'result' | 'question';
   content: string;
   timestamp: number;
   source?: string;

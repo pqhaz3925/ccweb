@@ -1,9 +1,18 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, SDKResultMessage, SDKAssistantMessage, SDKPartialAssistantMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, SDKResultMessage, SDKAssistantMessage, SDKPartialAssistantMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
 import { TypedEmitter } from '../shared/events.js';
 import type { SessionInfo, StreamChunk, SessionStatus } from '../shared/types.js';
 import { getDb } from './db.js';
+
+interface QuestionOption { label: string; description: string }
+interface QuestionItem { question: string; header: string; options: QuestionOption[]; multiSelect: boolean }
+interface PendingQuestion {
+  questions: QuestionItem[];
+  resolve: (answer: string) => void;
+}
+
+const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 export class Session {
   readonly id: string;
@@ -23,6 +32,7 @@ export class Session {
   private watchdogIntervalMs: number;
   private hasInitialized = false;
   private promptCount = 0;
+  private pendingQuestion: PendingQuestion | null = null;
 
   constructor(projectPath: string, opts: { timeoutMs: number; watchdogIntervalMs: number }) {
     this.id = randomUUID();
@@ -82,12 +92,66 @@ export class Session {
         options: {
           abortController: this.abortController,
           cwd: this.projectPath,
-          permissionMode: 'bypassPermissions',
+          permissionMode: 'acceptEdits',
           allowDangerouslySkipPermissions: true,
           includePartialMessages: true,
           resume: opts?.resume ?? this.sdkSessionId ?? undefined,
           settingSources: ['user', 'project', 'local'],
           env: envVars,
+          canUseTool: async (toolName, input, { signal }) => {
+            // Auto-allow everything except AskUserQuestion
+            if (toolName !== 'AskUserQuestion') {
+              return { behavior: 'allow' as const };
+            }
+
+            const qInput = input as { questions: QuestionItem[] };
+            const questions = qInput.questions ?? [];
+
+            // Format as readable text
+            let text = '';
+            for (let i = 0; i < questions.length; i++) {
+              const q = questions[i];
+              text += `${q.question} [${q.header}]\n`;
+              const letters = 'abcd';
+              for (let j = 0; j < q.options.length; j++) {
+                text += `  ${letters[j]}) ${q.options[j].label} — ${q.options[j].description}\n`;
+              }
+              text += `  ${letters[q.options.length]}) Other (type your own)\n`;
+              if (i < questions.length - 1) text += '\n';
+            }
+            text += '\nReply with your choice (e.g. "a" or the option text)';
+
+            this.emitChunk('question', text);
+
+            // Keep watchdog alive while waiting for answer
+            const keepAlive = setInterval(() => { this.lastEventTime = Date.now(); }, 5000);
+
+            return new Promise<PermissionResult>((resolve) => {
+              const timeout = setTimeout(() => {
+                clearInterval(keepAlive);
+                this.pendingQuestion = null;
+                this.emitChunk('status', 'Question timed out — no answer received');
+                resolve({ behavior: 'deny', message: 'No answer received (timeout)' });
+              }, QUESTION_TIMEOUT_MS);
+
+              signal.addEventListener('abort', () => {
+                clearInterval(keepAlive);
+                clearTimeout(timeout);
+                this.pendingQuestion = null;
+              });
+
+              this.pendingQuestion = {
+                questions,
+                resolve: (answer: string) => {
+                  clearInterval(keepAlive);
+                  clearTimeout(timeout);
+                  this.pendingQuestion = null;
+                  const answers = this.parseAnswer(answer, questions);
+                  resolve({ behavior: 'allow', updatedInput: { ...input, answers } });
+                },
+              };
+            });
+          },
         },
       });
 
@@ -115,7 +179,55 @@ export class Session {
     }
   }
 
+  hasPendingQuestion(): boolean {
+    return this.pendingQuestion !== null;
+  }
+
+  answerQuestion(answer: string): boolean {
+    if (!this.pendingQuestion) return false;
+    this.pendingQuestion.resolve(answer);
+    return true;
+  }
+
+  private parseAnswer(answer: string, questions: QuestionItem[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    const trimmed = answer.trim().toLowerCase();
+
+    for (const q of questions) {
+      const letters = 'abcd';
+      let matched = false;
+
+      // Check letter match: "a", "b", "c", "d"
+      for (let i = 0; i < q.options.length; i++) {
+        if (trimmed === letters[i] || trimmed === `${letters[i]})`) {
+          result[q.question] = q.options[i].label;
+          matched = true;
+          break;
+        }
+      }
+      if (matched) continue;
+
+      // Check option label match (case-insensitive)
+      for (const opt of q.options) {
+        if (trimmed === opt.label.toLowerCase()) {
+          result[q.question] = opt.label;
+          matched = true;
+          break;
+        }
+      }
+      if (matched) continue;
+
+      // Treat as custom "Other" answer
+      result[q.question] = answer.trim();
+    }
+
+    return result;
+  }
+
   async interrupt(): Promise<void> {
+    if (this.pendingQuestion) {
+      this.pendingQuestion = null;
+    }
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;

@@ -108,6 +108,18 @@ function ToolResultBubble({ content }: { content: string }) {
   );
 }
 
+const questionStyle: React.CSSProperties = {
+  padding: '12px 14px',
+  borderRadius: 12,
+  background: '#1a1a2e',
+  border: '1px solid #a78bfa44',
+  color: '#e0e0e0',
+  whiteSpace: 'pre-wrap',
+  fontSize: '14px',
+  lineHeight: 1.5,
+  marginBottom: 4,
+};
+
 export function MessageBubble({ msg }: { msg: ChatMessage }) {
   switch (msg.type) {
     case 'user':
@@ -118,6 +130,8 @@ export function MessageBubble({ msg }: { msg: ChatMessage }) {
       return <ToolUseBubble content={msg.content} />;
     case 'tool_result':
       return <ToolResultBubble content={msg.content} />;
+    case 'question':
+      return <div style={questionStyle}>{msg.content}</div>;
     case 'system':
     case 'status':
       return <div style={styles.systemMsg}>{msg.content}</div>;
