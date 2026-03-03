@@ -314,6 +314,7 @@ export async function startTelegramBot(
   sessionManager.emitter.on('ended', () => {
     if (activeChatId) {
       stopStreaming(activeChatId);
+      activeChatId = null;
     }
   });
 
@@ -322,6 +323,7 @@ export async function startTelegramBot(
       const state = getChatState(activeChatId);
       state.buffer += `\nError: ${err.message}`;
       stopStreaming(activeChatId);
+      activeChatId = null;
     }
   });
 
@@ -341,8 +343,12 @@ export async function startTelegramBot(
   );
 
   bot.command('stop', async (ctx) => {
-    await sessionManager.interrupt();
+    // Stop streaming FIRST so no more chunks get appended
     if (activeChatId) stopStreaming(activeChatId);
+    activeChatId = null; // Ignore any further chunks from SDK
+    try {
+      await sessionManager.interrupt();
+    } catch {}
     await ctx.reply('Stopped.');
   });
 
