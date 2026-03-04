@@ -7,7 +7,7 @@ const CONFIG_PATH = resolve(process.cwd(), 'ccweb.config.json');
 const DEFAULTS: CCWebConfig = {
   claude: { apiUrl: null, apiKey: null },
   web: { port: 3001, host: '0.0.0.0' },
-  telegram: { token: null, allowedUsers: [] },
+  telegram: { token: null, allowedUsers: [], allowedGroups: [] },
   session: {
     timeoutMs: 30 * 60 * 1000,
     watchdogIntervalMs: 10_000,

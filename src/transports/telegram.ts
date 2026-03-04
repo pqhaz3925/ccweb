@@ -2,22 +2,18 @@ import { Bot } from 'grammy';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionManager } from '../core/session-manager.js';
-import type { StreamChunk } from '../shared/types.js';
+import type { CCWebConfig, StreamChunk } from '../shared/types.js';
 
-const FLUSH_INTERVAL_MS = 1500;
+const EDIT_INTERVAL_MS = 2000;
 const TYPING_INTERVAL_MS = 4000;
 
 /**
  * Convert Claude markdown output to Telegram HTML.
- * Handles: bold, italic, code, pre blocks, links, strikethrough.
- * Escapes HTML entities in non-formatted text.
  */
 function markdownToTelegramHtml(text: string): string {
-  // First, extract code blocks and inline code to protect them
   const codeBlocks: string[] = [];
   const inlineCode: string[] = [];
 
-  // Replace fenced code blocks: ```lang\n...\n```
   let result = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
     const idx = codeBlocks.length;
     const escapedCode = escapeHtml(code.replace(/\n$/, ''));
@@ -29,31 +25,21 @@ function markdownToTelegramHtml(text: string): string {
     return `\x00CODEBLOCK${idx}\x00`;
   });
 
-  // Replace inline code: `...`
   result = result.replace(/`([^`\n]+)`/g, (_match, code) => {
     const idx = inlineCode.length;
     inlineCode.push(`<code>${escapeHtml(code)}</code>`);
     return `\x00INLINE${idx}\x00`;
   });
 
-  // Escape HTML in remaining text
   result = escapeHtml(result);
 
-  // Bold: **text** or __text__
   result = result.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
   result = result.replace(/__(.+?)__/g, '<b>$1</b>');
-
-  // Italic: *text* or _text_ (but not inside words)
   result = result.replace(/(?<!\w)\*([^*\n]+?)\*(?!\w)/g, '<i>$1</i>');
   result = result.replace(/(?<!\w)_([^_\n]+?)_(?!\w)/g, '<i>$1</i>');
-
-  // Strikethrough: ~~text~~
   result = result.replace(/~~(.+?)~~/g, '<s>$1</s>');
-
-  // Links: [text](url)
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
 
-  // Restore code blocks and inline code
   result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)]);
   result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCode[parseInt(idx)]);
 
@@ -74,37 +60,58 @@ function stripAnsi(str: string): string {
   );
 }
 
+function isGroup(chatType: string): boolean {
+  return chatType === 'group' || chatType === 'supergroup';
+}
+
 export async function startTelegramBot(
   sessionManager: SessionManager,
-  token: string,
-  allowedUsers: number[]
+  telegramConfig: CCWebConfig['telegram']
 ) {
+  const { token, allowedUsers, allowedGroups } = telegramConfig;
+  if (!token) throw new Error('Telegram token is required');
+
   const bot = new Bot(token);
+
+  const me = await bot.api.getMe();
+  const botUsername = me.username;
+  console.log(`[telegram] Bot username: @${botUsername}`);
 
   // Auth middleware
   bot.use(async (ctx, next) => {
     const userId = ctx.from?.id;
-    if (
-      !userId ||
-      (allowedUsers.length > 0 && !allowedUsers.includes(userId))
-    ) {
-      await ctx.reply('Unauthorized.');
-      return;
+    if (!userId) return;
+
+    const chatType = ctx.chat?.type;
+    if (!chatType) return;
+
+    if (isGroup(chatType)) {
+      const chatId = ctx.chat!.id;
+      if (allowedGroups.length === 0 || !allowedGroups.includes(chatId)) {
+        return;
+      }
+    } else {
+      if (allowedUsers.length > 0 && !allowedUsers.includes(userId)) {
+        await ctx.reply('Unauthorized.');
+        return;
+      }
     }
+
     await next();
   });
 
-  // State per chat for streaming output
+  // --- State per chat ---
+
   const chatState = new Map<
     number,
     {
       buffer: string;
-      fullText: string;
+      sentText: string;
+      messageId: number | null;
       flushTimer: ReturnType<typeof setInterval> | null;
       typingTimer: ReturnType<typeof setInterval> | null;
-      draftId: number;
-      draftSeq: number;
-      abortController: AbortController | null;
+      lastToolFull: string | null;
+      lastToolShort: string | null;
     }
   >();
 
@@ -112,23 +119,40 @@ export async function startTelegramBot(
     if (!chatState.has(chatId)) {
       chatState.set(chatId, {
         buffer: '',
-        fullText: '',
+        sentText: '',
+        messageId: null,
         flushTimer: null,
         typingTimer: null,
-        draftId: 0,
-        draftSeq: 0,
-        abortController: null,
+        lastToolFull: null,
+        lastToolShort: null,
       });
     }
     return chatState.get(chatId)!;
   }
 
-  // Send typing indicator periodically
+  function trimLastToolResult(chatId: number) {
+    const state = getChatState(chatId);
+    if (!state.lastToolFull || !state.lastToolShort) return;
+    if (state.lastToolFull === state.lastToolShort) {
+      state.lastToolFull = null;
+      state.lastToolShort = null;
+      return;
+    }
+
+    if (state.buffer.includes(state.lastToolFull)) {
+      state.buffer = state.buffer.replace(state.lastToolFull, state.lastToolShort);
+    } else if (state.sentText.includes(state.lastToolFull)) {
+      state.sentText = state.sentText.replace(state.lastToolFull, state.lastToolShort);
+    }
+    state.lastToolFull = null;
+    state.lastToolShort = null;
+  }
+
+  // --- Typing indicator ---
+
   function startTyping(chatId: number) {
     const state = getChatState(chatId);
-    // Send immediately
     bot.api.sendChatAction(chatId, 'typing').catch(() => {});
-    // Then every 4s (TG clears after 5s)
     if (state.typingTimer) clearInterval(state.typingTimer);
     state.typingTimer = setInterval(() => {
       bot.api.sendChatAction(chatId, 'typing').catch(() => {});
@@ -143,36 +167,49 @@ export async function startTelegramBot(
     }
   }
 
-  async function flushDraft(chatId: number) {
-    const state = getChatState(chatId);
-    if (!state.buffer && !state.fullText) return;
+  // --- Send / Edit helpers ---
 
-    const text = state.fullText + state.buffer;
-    state.fullText = text;
-    state.buffer = '';
+  async function editOrSend(
+    chatId: number,
+    text: string,
+    messageId: number | null
+  ): Promise<number | null> {
+    const html = markdownToTelegramHtml(text);
 
-    // Truncate for display if too long (TG limit 4096)
-    let displayText = text;
-    if (displayText.length > 4000) {
-      displayText = '...' + displayText.slice(-3997);
-    }
-    if (!displayText) displayText = '...';
-
-    try {
-      await bot.api.sendMessageDraft(chatId, state.draftId, displayText);
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : '';
-      // Fallback: if sendMessageDraft fails (e.g. old API), ignore silently
-      if (!errMsg.includes('not modified') && !errMsg.includes('DRAFT')) {
-        console.error('[telegram] Draft error:', errMsg);
+    if (messageId) {
+      try {
+        await bot.api.editMessageText(chatId, messageId, html, { parse_mode: 'HTML' });
+        return messageId;
+      } catch {
+        try {
+          await bot.api.editMessageText(chatId, messageId, text);
+          return messageId;
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : '';
+          if (!msg.includes('not modified')) {
+            console.error('[telegram] Edit error:', msg);
+          }
+          return messageId;
+        }
+      }
+    } else {
+      try {
+        const result = await bot.api.sendMessage(chatId, html, { parse_mode: 'HTML' });
+        return result.message_id;
+      } catch {
+        try {
+          const result = await bot.api.sendMessage(chatId, text);
+          return result.message_id;
+        } catch (e: unknown) {
+          console.error('[telegram] Send error:', e instanceof Error ? e.message : '');
+          return null;
+        }
       }
     }
   }
 
   async function sendLongMessage(chatId: number, text: string, html?: string) {
     const TG_LIMIT = 4096;
-
-    // Try HTML first, fall back to plain text
     const content = html || text;
     const fallback = html ? text : null;
 
@@ -187,7 +224,6 @@ export async function startTelegramBot(
       }
     }
 
-    // Split long text into chunks (use plain text for reliable splitting)
     const source = text;
     for (let i = 0; i < source.length; i += TG_LIMIT) {
       const chunk = source.slice(i, i + TG_LIMIT);
@@ -199,29 +235,53 @@ export async function startTelegramBot(
     }
   }
 
-  async function finalizeDraft(chatId: number) {
+  // --- Streaming: send message, edit as text grows, new msg on limit ---
+
+  async function flushEdit(chatId: number) {
     const state = getChatState(chatId);
-    const text = state.fullText + state.buffer;
+    if (!state.buffer.trim()) return;
+
+    const newContent = state.buffer;
     state.buffer = '';
-    state.fullText = '';
 
-    if (!text.trim()) return;
+    const combined = state.sentText + newContent;
 
-    const html = markdownToTelegramHtml(text);
-    await sendLongMessage(chatId, text, html);
+    if (combined.length <= 4000) {
+      state.messageId = await editOrSend(chatId, combined, state.messageId);
+      state.sentText = combined;
+    } else {
+      // Current message hit limit — start a new one
+      state.messageId = null;
+      state.sentText = '';
+
+      if (newContent.length <= 4000) {
+        state.messageId = await editOrSend(chatId, newContent, null);
+        state.sentText = newContent;
+      } else {
+        await sendLongMessage(chatId, newContent, markdownToTelegramHtml(newContent));
+      }
+    }
+  }
+
+  async function finalizeMessage(chatId: number) {
+    await flushEdit(chatId);
+    const state = getChatState(chatId);
+    state.messageId = null;
+    state.sentText = '';
   }
 
   function startStreaming(chatId: number) {
     const state = getChatState(chatId);
     state.buffer = '';
-    state.fullText = '';
-    state.draftSeq++;
-    state.draftId = Date.now() % 1000000; // unique draft id per stream
+    state.sentText = '';
+    state.messageId = null;
 
     startTyping(chatId);
 
     if (state.flushTimer) clearInterval(state.flushTimer);
-    state.flushTimer = setInterval(() => flushDraft(chatId), FLUSH_INTERVAL_MS);
+    state.flushTimer = setInterval(() => {
+      flushEdit(chatId).catch(() => {});
+    }, EDIT_INTERVAL_MS);
   }
 
   function stopStreaming(chatId: number) {
@@ -231,8 +291,10 @@ export async function startTelegramBot(
       state.flushTimer = null;
     }
     stopTyping(chatId);
-    finalizeDraft(chatId);
+    finalizeMessage(chatId).catch(() => {});
   }
+
+  // --- Tool formatting ---
 
   function formatToolUse(raw: string): string {
     try {
@@ -260,7 +322,7 @@ export async function startTelegramBot(
         case 'Task':
           return `> Task: ${input.description ?? input.prompt?.slice(0, 60) ?? ''}`;
         case 'TodoWrite':
-          return ''; // skip noise
+          return '';
         case 'WebFetch':
           return `> Fetch ${input.url ?? ''}`;
         case 'WebSearch':
@@ -273,23 +335,30 @@ export async function startTelegramBot(
     }
   }
 
+  // --- Chunk handling ---
+
   function appendChunk(chatId: number, chunk: StreamChunk) {
     const state = getChatState(chatId);
     const stripped = stripAnsi(chunk.content);
 
     switch (chunk.type) {
       case 'text':
+        trimLastToolResult(chatId);
         state.buffer += stripped;
         break;
       case 'tool_use': {
+        trimLastToolResult(chatId);
         const line = formatToolUse(stripped);
         if (line) state.buffer += `\n${line}\n`;
         break;
       }
       case 'tool_result':
-        // Only show short results or errors, skip verbose output
-        if (stripped.length > 0 && stripped.length <= 100) {
-          state.buffer += `${stripped}\n`;
+        if (stripped.length > 0) {
+          const full = (stripped.length > 500 ? stripped.slice(0, 500) + '...' : stripped) + '\n';
+          const short = (stripped.length > 100 ? stripped.slice(0, 100) + '...' : stripped) + '\n';
+          state.lastToolFull = full;
+          state.lastToolShort = short;
+          state.buffer += full;
         }
         break;
       case 'error':
@@ -327,7 +396,17 @@ export async function startTelegramBot(
     }
   });
 
-  // Commands
+  // --- Group helper ---
+
+  function extractGroupPrompt(text: string): string | null {
+    if (!botUsername) return null;
+    const mentionRe = new RegExp(`@${botUsername}\\b`, 'gi');
+    if (!mentionRe.test(text)) return null;
+    return text.replace(mentionRe, '').trim();
+  }
+
+  // --- Commands ---
+
   bot.command('start', (ctx) =>
     ctx.reply(
       'CCWeb Telegram Bot\n\n' +
@@ -343,9 +422,8 @@ export async function startTelegramBot(
   );
 
   bot.command('stop', async (ctx) => {
-    // Stop streaming FIRST so no more chunks get appended
     if (activeChatId) stopStreaming(activeChatId);
-    activeChatId = null; // Ignore any further chunks from SDK
+    activeChatId = null;
     try {
       await sessionManager.interrupt();
     } catch {}
@@ -390,7 +468,7 @@ export async function startTelegramBot(
   bot.command('restart', async (ctx) => {
     activeChatId = ctx.chat.id;
     startStreaming(ctx.chat.id);
-    await sessionManager.restart();
+    sessionManager.restart().catch(() => {});
   });
 
   bot.command('status', async (ctx) => {
@@ -423,24 +501,32 @@ export async function startTelegramBot(
     await ctx.reply(lines.join('\n'));
   });
 
-  // Plain text = send prompt
+  // --- Message handlers ---
+
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
     if (text.startsWith('/')) return;
 
+    let prompt = text;
+    if (isGroup(ctx.chat.type)) {
+      const extracted = extractGroupPrompt(text);
+      if (extracted === null) return;
+      prompt = extracted;
+      if (!prompt) return;
+    }
+
     activeChatId = ctx.chat.id;
     startStreaming(ctx.chat.id);
 
-    try {
-      await sessionManager.sendPrompt(text, 'telegram');
-    } catch (err) {
+    // Don't await — results come via events. Awaiting blocks grammy's update queue
+    // and prevents /stop from being processed while SDK is running.
+    sessionManager.sendPrompt(prompt, 'telegram').catch((err) => {
       const state = getChatState(ctx.chat.id);
       state.buffer += `\n${err instanceof Error ? err.message : 'Unknown error'}`;
       stopStreaming(ctx.chat.id);
-    }
+    });
   });
 
-  // Photo handling
   bot.on('message:photo', async (ctx) => {
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
     const caption = ctx.message.caption || 'Analyze this image';
@@ -460,10 +546,14 @@ export async function startTelegramBot(
 
       activeChatId = ctx.chat.id;
       startStreaming(ctx.chat.id);
-      await sessionManager.sendPrompt(
+      sessionManager.sendPrompt(
         `${caption}\n\n[Image saved to: ${filePath}]`,
         'telegram'
-      );
+      ).catch((err) => {
+        const state = getChatState(ctx.chat.id);
+        state.buffer += `\n${err instanceof Error ? err.message : 'Unknown error'}`;
+        stopStreaming(ctx.chat.id);
+      });
     } catch (err) {
       await ctx.reply(
         `Failed to process image: ${err instanceof Error ? err.message : 'unknown error'}`
@@ -471,7 +561,6 @@ export async function startTelegramBot(
     }
   });
 
-  // Document/file handling
   bot.on('message:document', async (ctx) => {
     const doc = ctx.message.document;
     const caption = ctx.message.caption || `Process this file: ${doc.file_name}`;
@@ -491,10 +580,14 @@ export async function startTelegramBot(
 
       activeChatId = ctx.chat.id;
       startStreaming(ctx.chat.id);
-      await sessionManager.sendPrompt(
+      sessionManager.sendPrompt(
         `${caption}\n\n[File "${fileName}" saved to: ${filePath}]`,
         'telegram'
-      );
+      ).catch((err) => {
+        const state = getChatState(ctx.chat.id);
+        state.buffer += `\n${err instanceof Error ? err.message : 'Unknown error'}`;
+        stopStreaming(ctx.chat.id);
+      });
     } catch (err) {
       await ctx.reply(
         `Failed to process file: ${err instanceof Error ? err.message : 'unknown error'}`
@@ -505,7 +598,6 @@ export async function startTelegramBot(
   bot.start();
   console.log('[telegram] Bot started');
 
-  // Set commands after bot.start() so the bot is already polling
   try {
     await bot.api.setMyCommands([
       { command: 'stop', description: 'Stop current task' },

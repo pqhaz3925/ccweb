@@ -10,6 +10,7 @@ export interface CCWebConfig {
   telegram: {
     token: string | null;
     allowedUsers: number[];
+    allowedGroups: number[];
   };
   session: {
     timeoutMs: number;

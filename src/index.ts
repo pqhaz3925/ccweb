@@ -16,7 +16,7 @@ async function main() {
   // Start Telegram bot if configured
   let bot: any = null;
   if (config.telegram.token) {
-    bot = await startTelegramBot(sessionManager, config.telegram.token, config.telegram.allowedUsers);
+    bot = await startTelegramBot(sessionManager, config.telegram);
   } else {
     console.log('[telegram] No token configured, skipping Telegram bot');
   }

@@ -112,6 +112,14 @@ export class Session {
           settingSources: ['user', 'project', 'local'],
           env: envVars,
           canUseTool: async (toolName, input, { signal }) => {
+            // Deny plan mode tools — no interactive UI in headless mode
+            if (toolName === 'EnterPlanMode' || toolName === 'ExitPlanMode') {
+              return {
+                behavior: 'deny' as const,
+                message: 'Plan mode is not available. Implement directly without planning.',
+              };
+            }
+
             // Auto-allow everything except AskUserQuestion
             if (toolName !== 'AskUserQuestion') {
               return { behavior: 'allow' as const };
