@@ -40,53 +40,55 @@ export class SessionManager {
     this.restoreFromDb();
   }
 
-  /** Reload the last active session from DB so conversation survives restarts */
+  /** Reload all sessions from DB so conversations survive restarts */
   private restoreFromDb() {
     const db = getDb();
-    // Only restore the most recent session with an sdk_session_id
-    const row = db.prepare(
+    const rows = db.prepare(
       `SELECT id, project_path, started_at, tokens_used, cost_usd, sdk_session_id
        FROM sessions WHERE sdk_session_id IS NOT NULL
-       ORDER BY last_activity_at DESC LIMIT 1`
-    ).get() as any;
+       ORDER BY last_activity_at ASC`
+    ).all() as any[];
 
-    if (!row) return;
+    if (rows.length === 0) return;
 
-    this.sessionCounter++;
-    const session = new Session(row.project_path, {
-      timeoutMs: this.config.timeoutMs,
-      watchdogIntervalMs: this.config.watchdogIntervalMs,
-      restore: {
-        id: row.id,
-        sdkSessionId: row.sdk_session_id,
-        startedAt: row.started_at,
-        tokensUsed: row.tokens_used ?? 0,
-        costUsd: row.cost_usd ?? 0,
-      },
-    });
+    for (const row of rows) {
+      this.sessionCounter++;
+      const session = new Session(row.project_path, {
+        timeoutMs: this.config.timeoutMs,
+        watchdogIntervalMs: this.config.watchdogIntervalMs,
+        restore: {
+          id: row.id,
+          sdkSessionId: row.sdk_session_id,
+          startedAt: row.started_at,
+          tokensUsed: row.tokens_used ?? 0,
+          costUsd: row.cost_usd ?? 0,
+        },
+      });
 
-    const label = `Chat ${this.sessionCounter}`;
+      const label = `Chat ${this.sessionCounter}`;
 
-    // Wire up event forwarding
-    session.emitter.on('chunk', (chunk) => {
-      if (this.activeSessionId === session.id) this.emitter.emit('chunk', chunk);
-    });
-    session.emitter.on('started', (info) => {
-      if (this.activeSessionId === session.id) this.emitter.emit('started', info);
-    });
-    session.emitter.on('ended', (info, reason) => {
-      if (this.activeSessionId === session.id) this.emitter.emit('ended', info, reason);
-    });
-    session.emitter.on('error', (err) => {
-      if (this.activeSessionId === session.id) this.emitter.emit('error', err);
-    });
-    session.emitter.on('status_change', (info) => {
-      if (this.activeSessionId === session.id) this.emitter.emit('status_change', info);
-    });
+      // Wire up event forwarding
+      session.emitter.on('chunk', (chunk) => {
+        if (this.activeSessionId === session.id) this.emitter.emit('chunk', chunk);
+      });
+      session.emitter.on('started', (info) => {
+        if (this.activeSessionId === session.id) this.emitter.emit('started', info);
+      });
+      session.emitter.on('ended', (info, reason) => {
+        if (this.activeSessionId === session.id) this.emitter.emit('ended', info, reason);
+      });
+      session.emitter.on('error', (err) => {
+        if (this.activeSessionId === session.id) this.emitter.emit('error', err);
+      });
+      session.emitter.on('status_change', (info) => {
+        if (this.activeSessionId === session.id) this.emitter.emit('status_change', info);
+      });
 
-    this.sessions.set(session.id, { session, label });
-    this.activeSessionId = session.id;
-    console.log(`[sessions] Restored session ${row.id.slice(0, 8)}... (sdk: ${row.sdk_session_id?.slice(0, 8)}...)`);
+      this.sessions.set(session.id, { session, label });
+      this.activeSessionId = session.id; // last one (most recent) becomes active
+    }
+
+    console.log(`[sessions] Restored ${rows.length} sessions`);
   }
 
   private createSession(label?: string): Session {
