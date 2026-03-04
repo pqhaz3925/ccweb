@@ -88,6 +88,8 @@ export class Session {
     }
 
     this.promptCount++;
+    const resumeId = opts?.resume ?? this.sdkSessionId ?? undefined;
+    console.log(`[session] sendPrompt #${this.promptCount} resume=${resumeId ?? 'NONE'} status=${this.status}`);
     this.abortController = new AbortController();
     this.setStatus('running');
     this.lastEventTime = Date.now();
@@ -182,7 +184,9 @@ export class Session {
         this.processMessage(message);
       }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      const isAbort = err instanceof Error && (err.name === 'AbortError' || err.message.includes('abort'));
+      console.log(`[session] sendPrompt catch: name=${(err as any)?.name} isAbort=${isAbort} msg=${(err as any)?.message?.slice(0, 100)}`);
+      if (isAbort) {
         this.setStatus('interrupted');
         this.emitChunk('status', 'Session interrupted');
         return;
@@ -258,6 +262,15 @@ export class Session {
   }
 
   private processMessage(message: SDKMessage) {
+    // Capture session_id from ANY message as early as possible
+    // so /stop mid-stream doesn't lose the ability to resume
+    const anyMsg = message as any;
+    if (anyMsg.session_id && !this.sdkSessionId) {
+      console.log(`[session] Captured session_id from ${message.type}: ${anyMsg.session_id}`);
+      this.sdkSessionId = anyMsg.session_id;
+      this.updateDb();
+    }
+
     switch (message.type) {
       case 'assistant': {
         const msg = message as SDKAssistantMessage;

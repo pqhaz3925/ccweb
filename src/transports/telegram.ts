@@ -112,6 +112,7 @@ export async function startTelegramBot(
       typingTimer: ReturnType<typeof setInterval> | null;
       lastToolFull: string | null;
       lastToolShort: string | null;
+      quiet: boolean;
     }
   >();
 
@@ -125,6 +126,7 @@ export async function startTelegramBot(
         typingTimer: null,
         lastToolFull: null,
         lastToolShort: null,
+        quiet: false,
       });
     }
     return chatState.get(chatId)!;
@@ -348,12 +350,14 @@ export async function startTelegramBot(
         break;
       case 'tool_use': {
         trimLastToolResult(chatId);
-        const line = formatToolUse(stripped);
-        if (line) state.buffer += `\n${line}\n`;
+        if (!state.quiet) {
+          const line = formatToolUse(stripped);
+          if (line) state.buffer += `\n${line}\n`;
+        }
         break;
       }
       case 'tool_result':
-        if (stripped.length > 0) {
+        if (!state.quiet && stripped.length > 0) {
           const full = (stripped.length > 500 ? stripped.slice(0, 500) + '...' : stripped) + '\n';
           const short = (stripped.length > 100 ? stripped.slice(0, 100) + '...' : stripped) + '\n';
           state.lastToolFull = full;
@@ -478,6 +482,12 @@ export async function startTelegramBot(
     await ctx.reply(`${statusIcon}\nProject: ${projectPath}\nChats: ${sessions.length}`);
   });
 
+  bot.command('quiet', async (ctx) => {
+    const state = getChatState(ctx.chat.id);
+    state.quiet = !state.quiet;
+    await ctx.reply(state.quiet ? 'Quiet mode: ON (text only)' : 'Quiet mode: OFF (showing tools)');
+  });
+
   bot.command('project', async (ctx) => {
     const path = ctx.match?.trim();
     if (!path) {
@@ -508,11 +518,30 @@ export async function startTelegramBot(
     if (text.startsWith('/')) return;
 
     let prompt = text;
+    const reply = ctx.message.reply_to_message;
+    const isReplyToBot = reply?.from?.id === me.id;
+
     if (isGroup(ctx.chat.type)) {
-      const extracted = extractGroupPrompt(text);
-      if (extracted === null) return;
-      prompt = extracted;
-      if (!prompt) return;
+      // In groups: respond to @mentions OR replies to bot messages
+      if (isReplyToBot) {
+        // Reply to bot = trigger, no need for @mention
+        prompt = text.replace(new RegExp(`@${botUsername}\\b`, 'gi'), '').trim();
+        if (!prompt) return;
+      } else {
+        const extracted = extractGroupPrompt(text);
+        if (extracted === null) return;
+        prompt = extracted;
+        if (!prompt) return;
+      }
+    }
+
+    // Add quoted message context
+    if (reply?.text) {
+      const quoted = reply.text.length > 500 ? reply.text.slice(0, 500) + '...' : reply.text;
+      prompt = `[Quoted message: ${quoted}]\n\n${prompt}`;
+    } else if (reply?.caption) {
+      const quoted = reply.caption.length > 500 ? reply.caption.slice(0, 500) + '...' : reply.caption;
+      prompt = `[Quoted message: ${quoted}]\n\n${prompt}`;
     }
 
     activeChatId = ctx.chat.id;
@@ -607,6 +636,7 @@ export async function startTelegramBot(
       { command: 'status', description: 'Current status' },
       { command: 'project', description: 'Switch project path' },
       { command: 'history', description: 'Recent session history' },
+      { command: 'quiet', description: 'Toggle quiet mode (hide tools)' },
       { command: 'restart', description: 'Restart Claude session' },
     ]);
     console.log('[telegram] Bot commands registered');

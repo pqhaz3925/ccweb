@@ -135,9 +135,11 @@ export class SessionManager {
   private getOrCreateActive(): Session {
     if (this.activeSessionId) {
       const entry = this.sessions.get(this.activeSessionId);
-      if (entry && !DEAD_STATES.has(entry.session.getInfo().status)) {
+      const status = entry?.session.getInfo().status;
+      if (entry && !DEAD_STATES.has(status!)) {
         return entry.session;
       }
+      console.log(`[sessions] Session ${this.activeSessionId} is ${status ?? 'missing'}, creating new`);
     }
     // Create a new session and set it as active
     const session = this.createSession();

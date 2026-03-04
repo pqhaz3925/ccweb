@@ -51,12 +51,32 @@ Deploy or update CCWeb on a remote Linux server.
    ssh user@host "systemctl daemon-reload && systemctl enable ccweb"
    ```
 
-6. **Restart service**
+6. **Sync plugins & skills** (ensures server has same enabledPlugins and project skills)
+   ```bash
+   # Merge enabledPlugins from template into server's settings.json (preserves env/permissions)
+   ssh user@host 'python3 -c "
+import json, os
+tpl = json.load(open(\"/opt/ccweb/server/claude-settings.template.json\"))
+settings_path = os.path.expanduser(\"~/.claude/settings.json\")
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+try:
+    s = json.load(open(settings_path))
+except:
+    s = {}
+s.setdefault(\"enabledPlugins\", {}).update(tpl.get(\"enabledPlugins\", {}))
+json.dump(s, open(settings_path, \"w\"), indent=2)
+print(\"Plugins merged:\", list(s[\"enabledPlugins\"].keys()))
+"'
+   # Sync skills to server's global skills dir (works regardless of defaultProject)
+   rsync -avz .claude/skills/ user@host:~/.claude/skills/
+   ```
+
+7. **Restart service**
    ```bash
    ssh user@host "systemctl restart ccweb && sleep 2 && systemctl status ccweb --no-pager"
    ```
 
-7. **Verify**
+8. **Verify**
    ```bash
    curl -s http://HOST:PORT/api/health
    ```
