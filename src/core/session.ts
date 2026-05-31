@@ -149,6 +149,23 @@ export class Session {
     this.steerBacklog = [];
   }
 
+  /** Transient SDK/API failures that are worth re-running the turn for. */
+  private isRetryableError(msg: string): boolean {
+    const m = msg.toLowerCase();
+    return (
+      m.includes('could not be parsed') ||      // model's tool call could not be parsed
+      (m.includes('tool call') && m.includes('parse')) ||
+      m.includes('overloaded') ||               // 529
+      m.includes('rate limit') ||
+      m.includes('429') ||
+      m.includes('500') || m.includes('502') || m.includes('503') || m.includes('529') ||
+      m.includes('timed out') || m.includes('timeout') ||
+      m.includes('econnreset') || m.includes('etimedout') ||
+      m.includes('socket hang up') || m.includes('fetch failed') ||
+      m.includes('error_during_execution')
+    );
+  }
+
   async sendPrompt(prompt: string, opts?: { resume?: string; env?: Record<string, string>; executablePath?: string }): Promise<void> {
     if (this.status === 'running') {
       throw new Error('Session already running. Interrupt first.');
@@ -168,14 +185,21 @@ export class Session {
     // Allow bypassPermissions when running as root (e.g. on VPS)
     envVars['IS_SANDBOX'] = '1';
 
-    this.inputClosed = false;
-    this.steerBacklog = [];
-    this.steerResolver = null;
-    this.streamedTextThisTurn = '';
-    const initialMsg = this.makeUserMsg(prompt);
+    const MAX_RETRIES = 2;
+    let attempt = 0;
 
     try {
-      const q = sdkQuery({
+      while (true) {
+        // Per-attempt state reset so a retry starts from a clean input stream.
+        this.abortController = new AbortController();
+        this.inputClosed = false;
+        this.steerBacklog = [];
+        this.steerResolver = null;
+        this.streamedTextThisTurn = '';
+        const initialMsg = this.makeUserMsg(prompt);
+
+        try {
+        const q = sdkQuery({
         prompt: this.makeInputStream(initialMsg),
         options: {
           abortController: this.abortController,
@@ -183,7 +207,7 @@ export class Session {
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
           includePartialMessages: true,
-          resume: opts?.resume ?? this.sdkSessionId ?? undefined,
+          resume: this.sdkSessionId ?? opts?.resume ?? undefined,
           settingSources: ['user', 'project', 'local'],
           env: envVars,
           systemPrompt: { type: 'preset', preset: 'claude_code', append: CCWEB_SYSTEM_APPEND },
@@ -253,30 +277,43 @@ export class Session {
         },
       });
 
-      for await (const message of q) {
-        this.lastEventTime = Date.now();
-        this.lastActivityAt = new Date().toISOString();
-        this.processMessage(message);
-        // After SDK signals end-of-turn, close the input stream so the iterator returns and the SDK exits cleanly
-        if (message.type === 'result') {
-          this.closeInputStream();
+        for await (const message of q) {
+          this.lastEventTime = Date.now();
+          this.lastActivityAt = new Date().toISOString();
+          this.processMessage(message);
+          // After SDK signals end-of-turn, close the input stream so the iterator returns and the SDK exits cleanly
+          if (message.type === 'result') {
+            this.closeInputStream();
+          }
+        }
+        break; // turn completed without throwing
+        } catch (err: unknown) {
+          const isAbort = err instanceof Error && (err.name === 'AbortError' || err.message.includes('abort'));
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          console.log(`[session] sendPrompt catch (attempt ${attempt}): isAbort=${isAbort} msg=${errorMsg}`);
+          if (isAbort) {
+            this.setStatus('interrupted');
+            this.emitChunk('status', 'Session interrupted');
+            return;
+          }
+          // Auto-retry transient failures (tool-call parse, overloaded, timeouts, 5xx).
+          if (this.isRetryableError(errorMsg) && attempt < MAX_RETRIES && (this.status as string) === 'running') {
+            attempt++;
+            this.closeInputStream();
+            const waitMs = 1500 * attempt;
+            console.log(`[session] retryable error, retry ${attempt}/${MAX_RETRIES} in ${waitMs}ms`);
+            this.emitChunk('status', `⚠️ ${errorMsg.slice(0, 80)} — retrying ${attempt}/${MAX_RETRIES}…`);
+            await new Promise((r) => setTimeout(r, waitMs));
+            if ((this.status as string) !== 'running') return; // interrupted during backoff
+            this.lastEventTime = Date.now();
+            continue;
+          }
+          this.setStatus('error');
+          this.emitChunk('error', attempt > 0 ? `${errorMsg} (after ${attempt} ${attempt === 1 ? 'retry' : 'retries'})` : errorMsg);
+          this.emitter.emit('error', err instanceof Error ? err : new Error(errorMsg));
+          return;
         }
       }
-    } catch (err: unknown) {
-      const isAbort = err instanceof Error && (err.name === 'AbortError' || err.message.includes('abort'));
-      const errMsg = (err as any)?.message ?? String(err);
-      const errCause = (err as any)?.cause;
-      const errStack = (err as any)?.stack?.split('\n').slice(0, 3).join(' | ');
-      console.log(`[session] sendPrompt catch: name=${(err as any)?.name} isAbort=${isAbort} msg=${errMsg} cause=${JSON.stringify(errCause)} stack=${errStack}`);
-      if (isAbort) {
-        this.setStatus('interrupted');
-        this.emitChunk('status', 'Session interrupted');
-        return;
-      }
-      this.setStatus('error');
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      this.emitChunk('error', errorMsg);
-      this.emitter.emit('error', err instanceof Error ? err : new Error(errorMsg));
     } finally {
       this.closeInputStream();
       this.stopWatchdog();
