@@ -21,10 +21,15 @@ async function main() {
   }
   const server = await startWebServer(sessionManager, config.web.port, config.web.host, config.web.password);
 
-  // Start Telegram bot if configured
+  // Start Telegram bot if configured. A bad/revoked token must NOT take down the
+  // (already-secured) web dashboard — log and continue instead of crash-looping.
   let bot: any = null;
   if (config.telegram.token) {
-    bot = await startTelegramBot(sessionManager, config.telegram);
+    try {
+      bot = await startTelegramBot(sessionManager, config.telegram);
+    } catch (err) {
+      console.error('[telegram] Failed to start bot (continuing without it):', err instanceof Error ? err.message : err);
+    }
   } else {
     console.log('[telegram] No token configured, skipping Telegram bot');
   }
