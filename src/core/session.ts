@@ -1,7 +1,7 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, SDKResultMessage, SDKAssistantMessage, SDKPartialAssistantMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, SDKResultMessage, SDKAssistantMessage, SDKPartialAssistantMessage, PermissionResult, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
-import { TypedEmitter } from '../shared/events.js';
+import { EventEmitter } from 'node:events';
 import type { SessionInfo, StreamChunk, SessionStatus } from '../shared/types.js';
 import { getDb } from './db.js';
 
@@ -14,10 +14,24 @@ interface PendingQuestion {
 
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
+const CCWEB_SYSTEM_APPEND = `<ccweb-context>
+You are running inside CCWeb, a Telegram/web bridge for Claude Code. Apply these rules in addition to your defaults.
+
+1. NEVER call the AskUserQuestion tool. If you need clarification, write the question as a plain assistant message and stop. Treat the user's next message as the answer.
+
+2. Never run a long-running process (dev server, file watcher, queue worker, daemon, hot-reload, log tail, infinite loop) as a foreground Bash command. Bash waits for the command to exit, so a foreground dev server hangs the whole session. Detach it instead:
+
+    nohup <cmd> > /tmp/<name>.log 2>&1 &
+    disown
+    echo "PID $!"
+
+   Then verify with a quick non-blocking check (sleep 2 && curl -sS .../health, or pgrep) and move on. Read logs later with \`tail -n 50 /tmp/<name>.log\` — never \`tail -f\` in the foreground.
+</ccweb-context>`;
+
 export class Session {
   readonly id: string;
   readonly projectPath: string;
-  readonly emitter = new TypedEmitter();
+  readonly emitter = new EventEmitter();
 
   private status: SessionStatus = 'idle';
   private abortController: AbortController | null = null;
@@ -33,6 +47,10 @@ export class Session {
   private hasInitialized = false;
   private promptCount = 0;
   private pendingQuestion: PendingQuestion | null = null;
+  private steerResolver: ((msg: SDKUserMessage | null) => void) | null = null;
+  private steerBacklog: SDKUserMessage[] = [];
+  private inputClosed = true;
+  private streamedTextThisTurn = '';
 
   constructor(projectPath: string, opts: { timeoutMs: number; watchdogIntervalMs: number; restore?: { id: string; sdkSessionId: string | null; startedAt: string; tokensUsed: number; costUsd: number } }) {
     this.projectPath = projectPath;
@@ -82,7 +100,56 @@ export class Session {
     ).run(this.id, 'user', prompt, new Date().toISOString(), source ? JSON.stringify({ source }) : null);
   }
 
-  async sendPrompt(prompt: string, opts?: { resume?: string; env?: Record<string, string> }): Promise<void> {
+  /** Inject a user message into a running session. Returns false if not running. */
+  steer(prompt: string): boolean {
+    if (this.status !== 'running' || this.inputClosed) return false;
+    const msg = this.makeUserMsg(prompt);
+    if (this.steerResolver) {
+      const r = this.steerResolver;
+      this.steerResolver = null;
+      r(msg);
+    } else {
+      this.steerBacklog.push(msg);
+    }
+    return true;
+  }
+
+  private makeUserMsg(content: string): SDKUserMessage {
+    return {
+      type: 'user',
+      message: { role: 'user', content },
+      parent_tool_use_id: null,
+      session_id: this.sdkSessionId ?? '',
+    };
+  }
+
+  private async *makeInputStream(initial: SDKUserMessage): AsyncIterable<SDKUserMessage> {
+    yield initial;
+    while (!this.inputClosed) {
+      if (this.steerBacklog.length > 0) {
+        yield this.steerBacklog.shift()!;
+        continue;
+      }
+      const next = await new Promise<SDKUserMessage | null>((resolve) => {
+        this.steerResolver = resolve;
+      });
+      this.steerResolver = null;
+      if (next === null || this.inputClosed) return;
+      yield next;
+    }
+  }
+
+  private closeInputStream() {
+    this.inputClosed = true;
+    if (this.steerResolver) {
+      const r = this.steerResolver;
+      this.steerResolver = null;
+      r(null);
+    }
+    this.steerBacklog = [];
+  }
+
+  async sendPrompt(prompt: string, opts?: { resume?: string; env?: Record<string, string>; executablePath?: string }): Promise<void> {
     if (this.status === 'running') {
       throw new Error('Session already running. Interrupt first.');
     }
@@ -101,9 +168,15 @@ export class Session {
     // Allow bypassPermissions when running as root (e.g. on VPS)
     envVars['IS_SANDBOX'] = '1';
 
+    this.inputClosed = false;
+    this.steerBacklog = [];
+    this.steerResolver = null;
+    this.streamedTextThisTurn = '';
+    const initialMsg = this.makeUserMsg(prompt);
+
     try {
       const q = sdkQuery({
-        prompt,
+        prompt: this.makeInputStream(initialMsg),
         options: {
           abortController: this.abortController,
           cwd: this.projectPath,
@@ -113,6 +186,8 @@ export class Session {
           resume: opts?.resume ?? this.sdkSessionId ?? undefined,
           settingSources: ['user', 'project', 'local'],
           env: envVars,
+          systemPrompt: { type: 'preset', preset: 'claude_code', append: CCWEB_SYSTEM_APPEND },
+          ...(opts?.executablePath ? { pathToClaudeCodeExecutable: opts.executablePath } : {}),
           canUseTool: async (toolName, input, { signal }) => {
             // Deny plan mode tools — no interactive UI in headless mode
             if (toolName === 'EnterPlanMode' || toolName === 'ExitPlanMode') {
@@ -182,10 +257,17 @@ export class Session {
         this.lastEventTime = Date.now();
         this.lastActivityAt = new Date().toISOString();
         this.processMessage(message);
+        // After SDK signals end-of-turn, close the input stream so the iterator returns and the SDK exits cleanly
+        if (message.type === 'result') {
+          this.closeInputStream();
+        }
       }
     } catch (err: unknown) {
       const isAbort = err instanceof Error && (err.name === 'AbortError' || err.message.includes('abort'));
-      console.log(`[session] sendPrompt catch: name=${(err as any)?.name} isAbort=${isAbort} msg=${(err as any)?.message?.slice(0, 100)}`);
+      const errMsg = (err as any)?.message ?? String(err);
+      const errCause = (err as any)?.cause;
+      const errStack = (err as any)?.stack?.split('\n').slice(0, 3).join(' | ');
+      console.log(`[session] sendPrompt catch: name=${(err as any)?.name} isAbort=${isAbort} msg=${errMsg} cause=${JSON.stringify(errCause)} stack=${errStack}`);
       if (isAbort) {
         this.setStatus('interrupted');
         this.emitChunk('status', 'Session interrupted');
@@ -196,6 +278,7 @@ export class Session {
       this.emitChunk('error', errorMsg);
       this.emitter.emit('error', err instanceof Error ? err : new Error(errorMsg));
     } finally {
+      this.closeInputStream();
       this.stopWatchdog();
       if ((this.status as string) === 'running') {
         this.setStatus('idle');
@@ -253,6 +336,7 @@ export class Session {
     if (this.pendingQuestion) {
       this.pendingQuestion = null;
     }
+    this.closeInputStream();
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -275,21 +359,35 @@ export class Session {
       case 'assistant': {
         const msg = message as SDKAssistantMessage;
         this.sdkSessionId = msg.session_id;
+        let assistantFullText = '';
         for (const block of msg.message.content) {
-          if (block.type === 'tool_use') {
-            this.emitChunk('tool_use', JSON.stringify({ tool: block.name, input: block.input }));
-          } else if (block.type === 'tool_result') {
-            const result = block as any;
-            const text = typeof result.content === 'string'
-              ? result.content
-              : Array.isArray(result.content)
-                ? result.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
+          const b = block as any;
+          if (b.type === 'text' && typeof b.text === 'string') {
+            assistantFullText += b.text;
+          } else if (b.type === 'tool_use') {
+            this.emitChunk('tool_use', JSON.stringify({ tool: b.name, input: b.input }));
+          } else if (b.type === 'tool_result') {
+            const text = typeof b.content === 'string'
+              ? b.content
+              : Array.isArray(b.content)
+                ? b.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
                 : '';
             if (text) {
               this.emitChunk('tool_result', text.slice(0, 2000));
             }
           }
         }
+        // Safety net: if stream_event didn't deliver everything (or didn't fire at all),
+        // emit the missing tail so the user actually sees the assistant's text.
+        if (assistantFullText) {
+          if (assistantFullText.startsWith(this.streamedTextThisTurn)) {
+            const tail = assistantFullText.slice(this.streamedTextThisTurn.length);
+            if (tail) this.emitChunk('text', tail);
+          } else if (!this.streamedTextThisTurn) {
+            this.emitChunk('text', assistantFullText);
+          }
+        }
+        this.streamedTextThisTurn = '';
         if (msg.message.usage) {
           this.tokensUsed += (msg.message.usage.input_tokens ?? 0) + (msg.message.usage.output_tokens ?? 0);
         }
@@ -297,9 +395,14 @@ export class Session {
       }
       case 'stream_event': {
         const partial = message as SDKPartialAssistantMessage;
-        const evt = partial.event;
-        if ('delta' in evt && evt.delta && 'text' in evt.delta) {
-          this.emitChunk('text', evt.delta.text);
+        const evt = partial.event as any;
+        if (evt?.delta) {
+          if (typeof evt.delta.text === 'string') {
+            this.streamedTextThisTurn += evt.delta.text;
+            this.emitChunk('text', evt.delta.text);
+          } else if (typeof evt.delta.thinking === 'string') {
+            this.emitChunk('thinking', evt.delta.thinking);
+          }
         }
         break;
       }

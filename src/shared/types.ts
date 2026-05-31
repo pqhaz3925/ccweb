@@ -2,10 +2,13 @@ export interface CCWebConfig {
   claude: {
     apiUrl: string | null;
     apiKey: string | null;
+    executablePath: string | null;
   };
   web: {
     port: number;
     host: string;
+    /** If set, the web dashboard (HTTP + WebSocket) requires HTTP Basic Auth with this password. */
+    password: string | null;
   };
   telegram: {
     token: string | null;

@@ -1,7 +1,10 @@
 {
   "web": {
     "port": 3001,
-    "host": "0.0.0.0"
+    "host": "127.0.0.1",
+    "_comment_host": "Safe default: loopback only. To expose off-box, set host to 0.0.0.0 AND set password below (or front it with a reverse proxy / SSH tunnel).",
+    "password": null,
+    "_comment_password": "When set, the web dashboard requires HTTP Basic Auth (any username + this password) on every route and the WebSocket."
   },
   "telegram": {
     "token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",

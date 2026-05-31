@@ -2,10 +2,10 @@ import { EventEmitter } from 'node:events';
 import type { StreamChunk, SessionInfo } from './types.js';
 
 export interface SessionEvents {
-  'chunk': (chunk: StreamChunk) => void;
+  'chunk': (chunk: StreamChunk, sessionId: string) => void;
   'started': (session: SessionInfo) => void;
   'ended': (session: SessionInfo, reason: string) => void;
-  'error': (error: Error) => void;
+  'error': (error: Error, sessionId: string) => void;
   'status_change': (session: SessionInfo) => void;
 }
 

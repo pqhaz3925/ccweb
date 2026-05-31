@@ -5,8 +5,10 @@ import type { CCWebConfig } from './shared/types.js';
 const CONFIG_PATH = resolve(process.cwd(), 'ccweb.config.json');
 
 const DEFAULTS: CCWebConfig = {
-  claude: { apiUrl: null, apiKey: null },
-  web: { port: 3001, host: '0.0.0.0' },
+  claude: { apiUrl: null, apiKey: null, executablePath: null },
+  // Safe default: bind to loopback only. Expose via reverse proxy / SSH tunnel,
+  // or set web.host to 0.0.0.0 together with web.password for direct access.
+  web: { port: 3001, host: '127.0.0.1', password: null },
   telegram: { token: null, allowedUsers: [], allowedGroups: [] },
   session: {
     timeoutMs: 30 * 60 * 1000,

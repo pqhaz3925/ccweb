@@ -3,6 +3,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
 import type { SessionManager } from '../core/session-manager.js';
 import type { ClientMessage, ServerMessage, StreamChunk, SessionInfo, SessionSummaryWire } from '../shared/types.js';
 import {
@@ -21,8 +22,39 @@ function buildSessionsList(sm: SessionManager): { sessions: SessionSummaryWire[]
   return { sessions, activeId };
 }
 
-export async function startWebServer(sessionManager: SessionManager, port: number, host: string) {
+/** Constant-time string compare that won't throw on length mismatch. */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+export async function startWebServer(
+  sessionManager: SessionManager,
+  port: number,
+  host: string,
+  password?: string | null
+) {
   const fastify = Fastify({ logger: false });
+
+  // Auth: when a password is configured, require HTTP Basic Auth on EVERY request
+  // (REST routes, static assets, and the /ws upgrade). This closes the unauthenticated
+  // RCE / permission-bypass / prompt-injection surface when the dashboard is exposed.
+  if (password) {
+    fastify.addHook('onRequest', async (req, reply) => {
+      const header = req.headers.authorization ?? '';
+      if (header.startsWith('Basic ')) {
+        const decoded = Buffer.from(header.slice(6), 'base64').toString('utf-8');
+        const pass = decoded.slice(decoded.indexOf(':') + 1);
+        if (safeEqual(pass, password)) return; // authorized
+      }
+      reply
+        .code(401)
+        .header('WWW-Authenticate', 'Basic realm="CCWeb", charset="UTF-8"')
+        .send('Authentication required');
+    });
+  }
 
   await fastify.register(fastifyWebsocket);
 
@@ -138,12 +170,30 @@ export async function startWebServer(sessionManager: SessionManager, port: numbe
       send({ type: 'history', messages: existingMessages });
     }
 
-    // Subscribe to session events
-    const onChunk = (chunk: StreamChunk) => send({ type: 'chunk', chunk });
-    const onStarted = (session: SessionInfo) => send({ type: 'session_started', session });
-    const onEnded = (session: SessionInfo, reason: string) => send({ type: 'session_ended', session, reason });
-    const onError = (err: Error) => send({ type: 'session_error', error: err.message });
-    const onStatusChange = (session: SessionInfo) => send({ type: 'status', session, project: null });
+    // Track which session this WS client is viewing
+    let wsUserId = 'default';
+
+    // Subscribe to session events — filter by user's active session
+    const onChunk = (chunk: StreamChunk, sessionId: string) => {
+      const activeId = sessionManager.getActiveSessionId(wsUserId);
+      if (sessionId === activeId) send({ type: 'chunk', chunk });
+    };
+    const onStarted = (session: SessionInfo) => {
+      const activeId = sessionManager.getActiveSessionId(wsUserId);
+      if (session.id === activeId) send({ type: 'session_started', session });
+    };
+    const onEnded = (session: SessionInfo, reason: string) => {
+      const activeId = sessionManager.getActiveSessionId(wsUserId);
+      if (session.id === activeId) send({ type: 'session_ended', session, reason });
+    };
+    const onError = (err: Error, sessionId: string) => {
+      const activeId = sessionManager.getActiveSessionId(wsUserId);
+      if (sessionId === activeId) send({ type: 'session_error', error: err.message });
+    };
+    const onStatusChange = (session: SessionInfo) => {
+      const activeId = sessionManager.getActiveSessionId(wsUserId);
+      if (session.id === activeId) send({ type: 'status', session, project: null });
+    };
 
     sessionManager.emitter.on('chunk', onChunk);
     sessionManager.emitter.on('started', onStarted);

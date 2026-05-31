@@ -40,6 +40,19 @@ function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
   `);
+
+  // Add columns introduced after initial schema. SQLite lacks IF NOT EXISTS for
+  // ADD COLUMN, so swallow "duplicate column" errors.
+  for (const stmt of [
+    `ALTER TABLE sessions ADD COLUMN chat_number INTEGER`,
+    `ALTER TABLE sessions ADD COLUMN label TEXT`,
+    `ALTER TABLE sessions ADD COLUMN auto_label INTEGER NOT NULL DEFAULT 1`,
+  ]) {
+    try { db.exec(stmt); } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '';
+      if (!/duplicate column/i.test(msg)) console.error('[db] migration failed:', msg);
+    }
+  }
 }
 
 export function closeDb() {
